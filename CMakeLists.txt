@@ -66,6 +66,21 @@ target_link_libraries(px4_offboard_lib
   Eigen3::Eigen
 )
 
+if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+
+  ament_add_gtest(test_rc_input
+    test/test_rc_input.cpp
+  )
+  target_link_libraries(test_rc_input
+    px4_offboard_lib
+  )
+  ament_target_dependencies(test_rc_input
+    rclcpp
+    px4_msgs
+  )
+endif()
+
 # ---------------------------------------------
 # 控制节点：offboard_node
 add_executable(offboard_node

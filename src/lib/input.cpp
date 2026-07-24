@@ -1,69 +1,168 @@
 #include "lib/input.hpp"
+#include <algorithm>
+#include <array>
 
 
 // RC_Data_t
 // 初始化
 RC_Data_t::RC_Data_t(const rclcpp::Node::SharedPtr& node) : node_(node){
-    rcv_stamp =  node_ -> now();
+    rcv_stamp = rclcpp::Time(0, 0, node_->get_clock()->get_clock_type());
     mode = -1.0;
+    gear = -1.0;
     last_mode = -1.0;
+    last_gear = -1.0;
+    p = 0.0;
+    i = 0.0;
+    d = 0.0;
     for (int i = 0; i < 4; ++i){
         ch[i] = 0.0;
     }
-    is_hover_mode = false;
-    enter_hover_mode = false;
 }
 
 // 检测 RC 是否合法
-void RC_Data_t::check_validity(){
-    if (mode >= -1.1 && mode <= 1.1 ){
-        // pass
+bool RC_Data_t::check_validity() const{
+    return has_received && valid && !msg.signal_lost;
+}
+
+bool RC_Data_t::is_fresh(const rclcpp::Time& now_time, double timeout_s) const{
+    if (!check_validity() || timeout_s < 0.0 ||
+        now_time.get_clock_type() != rcv_stamp.get_clock_type()){
+        return false;
     }
-    else{
-        RCLCPP_ERROR(node_->get_logger(), "RC data validity check fail. mode=%f", mode);
-    }
+
+    const double age_s = (now_time - rcv_stamp).seconds();
+    return age_s >= 0.0 && age_s < timeout_s;
+}
+
+void RC_Data_t::invalidate(const char* reason){
+    valid = false;
+    mode = -1.0;
+    gear = -1.0;
+    p = 0.0;
+    i = 0.0;
+    d = 0.0;
+    std::fill_n(ch, 4, 0.0);
+    is_hover_mode = false;
+    enter_hover_mode = false;
+    is_offboard = false;
+    enter_offboard = false;
+    have_init_last_mode = false;
+    have_init_last_gear = false;
+    last_mode = -1.0;
+    last_gear = -1.0;
+    RCLCPP_ERROR(node_->get_logger(), "Rejecting RC frame: %s", reason);
 }
 
 // 检测摇杆是否回正
 bool RC_Data_t::check_centered(){
-    return abs(ch[0]) < 1e-5 && abs(ch[1]) < 1e-5 && abs(ch[2]) < 1e-5 && abs(ch[3]) < 1e-5;
+    return valid && std::abs(ch[0]) < 1e-5 && std::abs(ch[1]) < 1e-5 &&
+           std::abs(ch[2]) < 1e-5 && std::abs(ch[3]) < 1e-5;
 }
 
 // 映射遥控器
 void RC_Data_t::feed(px4_msgs::msg::RcChannels::SharedPtr pMsg, const Param_t& param){
-    msg = *pMsg;
-    rcv_stamp =  node_ -> now();
+    if (!pMsg){
+        invalidate("null message");
+        return;
+    }
 
-    // 提取遥控器通道数据（根据实际通道映射调整）
-    for(int i = 0; i < 4; i++){
-        ch[i] = ((double)msg.channels[i] - 1500.0) / 500.0;
-        // 对处于死区的数据进行处理
-        // 防止对摇杆过度敏感
-        if (ch[i] > DEAD_ZONE){
-            ch[i] = (ch[i] - DEAD_ZONE) / (1 - DEAD_ZONE);
+    msg = *pMsg;
+    rcv_stamp = node_->now();
+    has_received = true;
+    valid = false;
+
+    if (msg.signal_lost){
+        invalidate("signal_lost is set");
+        return;
+    }
+
+    constexpr std::size_t STICK_CHANNEL_COUNT = 4;
+    const std::array<int, 5> configured_channels{
+        param.rc_debug.ch_p,
+        param.rc_debug.ch_i,
+        param.rc_debug.ch_d,
+        param.rc_debug.ch_mode,
+        param.rc_debug.ch_gear,
+    };
+
+    std::size_t required_channel_count = STICK_CHANNEL_COUNT;
+    for (const int channel : configured_channels){
+        if (channel < 0 ||
+            static_cast<std::size_t>(channel) >= msg.channels.size()){
+            invalidate("configured channel index is out of bounds");
+            return;
         }
-        else if (ch[i] < - DEAD_ZONE){
-            ch[i] = (ch[i] + DEAD_ZONE) / (1 - DEAD_ZONE);
+        required_channel_count =
+            std::max(required_channel_count, static_cast<std::size_t>(channel + 1));
+    }
+
+    if (msg.channel_count > msg.channels.size() ||
+        msg.channel_count < required_channel_count){
+        invalidate("channel_count does not cover all required channels");
+        return;
+    }
+
+    const auto normalized_channel_is_valid = [this](std::size_t channel){
+        constexpr float RANGE_EPSILON = 1e-4F;
+        const float value = msg.channels[channel];
+        return std::isfinite(value) &&
+               value >= -1.0F - RANGE_EPSILON &&
+               value <= 1.0F + RANGE_EPSILON;
+    };
+
+    for (std::size_t channel = 0; channel < STICK_CHANNEL_COUNT; ++channel){
+        if (!normalized_channel_is_valid(channel)){
+            invalidate("stick channel is non-finite or outside normalized range");
+            return;
         }
-        else{
-            ch[i] = 0.0;
+    }
+    for (const int channel : configured_channels){
+        if (!normalized_channel_is_valid(static_cast<std::size_t>(channel))){
+            invalidate("mapped channel is non-finite or outside normalized range");
+            return;
         }
     }
 
-    mode = ((double)msg.channels[param.rc_debug.ch_mode] - 1000.0) / 1000.0;
-    gear = ((double)msg.channels[param.rc_debug.ch_gear] - 1000.0) / 1000.0;
+
+    // 提取遥控器通道数据（根据实际通道映射调整）
+    for(std::size_t channel = 0; channel < STICK_CHANNEL_COUNT; ++channel){
+        ch[channel] = static_cast<double>(msg.channels[channel]);
+        // 对处于死区的数据进行处理
+        // 防止对摇杆过度敏感
+        if (ch[channel] > DEAD_ZONE){
+            ch[channel] = (ch[channel] - DEAD_ZONE) / (1 - DEAD_ZONE);
+        }
+        else if (ch[channel] < - DEAD_ZONE){
+            ch[channel] = (ch[channel] + DEAD_ZONE) / (1 - DEAD_ZONE);
+        }
+        else{
+            ch[channel] = 0.0;
+        }
+    }
+
+    mode = static_cast<double>(msg.channels[param.rc_debug.ch_mode]);
+    gear = static_cast<double>(msg.channels[param.rc_debug.ch_gear]);
     #ifdef TEXT_RC
         double mock_mode = 0.0;
         double mock_gear = 0.0;
         node_->get_parameter_or("mock_rc_mode", mock_mode, 0.0);
         node_->get_parameter_or("mock_rc_gear", mock_gear, 0.0);
+        if (!std::isfinite(mock_mode) || !std::isfinite(mock_gear) ||
+            mock_mode < -1.0 || mock_mode > 1.0 ||
+            mock_gear < -1.0 || mock_gear > 1.0){
+            invalidate("mock RC switch is non-finite or outside normalized range");
+            return;
+        }
         mode = mock_mode;
         gear = mock_gear;
     #endif
     // 这里归一到了 [0, 1] ，如有别的需求，自行进行修改
-    p = ((double)msg.channels[param.rc_debug.ch_p] - 1000.0) / 1000.0;
-    i = ((double)msg.channels[param.rc_debug.ch_i] - 1000.0) / 1000.0;
-    d = ((double)msg.channels[param.rc_debug.ch_d] - 1000.0) / 1000.0;
+    p = (static_cast<double>(msg.channels[param.rc_debug.ch_p]) + 1.0) / 2.0;
+    i = (static_cast<double>(msg.channels[param.rc_debug.ch_i]) + 1.0) / 2.0;
+    d = (static_cast<double>(msg.channels[param.rc_debug.ch_d]) + 1.0) / 2.0;
+    valid = true;
+    enter_hover_mode = false;
+    enter_offboard = false;
 
     // 检测模式切换
     if (!have_init_last_mode) {
@@ -89,6 +188,8 @@ void RC_Data_t::feed(px4_msgs::msg::RcChannels::SharedPtr pMsg, const Param_t& p
     }
     else{
         is_hover_mode = false;
+        is_offboard = false;
+        enter_offboard = false;
     }
 
     // 只有在悬浮模式
@@ -227,7 +328,7 @@ Battery_Data_t::Battery_Data_t(const rclcpp::Node::SharedPtr& node) : node_(node
 void Battery_Data_t::feed(px4_msgs::msg::BatteryStatus::SharedPtr pMsg){
     msg = *pMsg;
     rcv_stamp =  node_ -> now();
-    volt = msg.voltage_filtered_v;
+    volt = msg.voltage_v;
     percentage = msg.remaining;
     flyTime = msg.time_remaining_s;
     warning = msg.warning;

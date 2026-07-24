@@ -103,7 +103,7 @@ void CtrlFSM::FSM(){
             
 
             // 遥控器进入自动悬浮模式
-            if (rc_data.enter_hover_mode){
+            if (rc_is_received(now_time) && rc_data.enter_hover_mode){
                 // 检测传感器是否在线
                 if (!odom_is_received(now_time)){
                     RCLCPP_WARN(node_->get_logger(), "传感器定位丢失，拒绝进入悬浮模式！");
@@ -174,7 +174,7 @@ void CtrlFSM::FSM(){
 
         case AUTO_HOVER:{
             // 当遥控器不处于悬浮模式，或传感器失效，返回 POSITON
-            if (!rc_data.is_hover_mode || !odom_is_received(now_time)){
+            if (!rc_is_received(now_time) || !rc_data.is_hover_mode || !odom_is_received(now_time)){
                 state = POSITION;
                 switch_to_offboard(now_time, false);
                 RCLCPP_WARN(node_->get_logger(), "返回 POSITION 模式！");
@@ -206,7 +206,7 @@ void CtrlFSM::FSM(){
 
         case OFFBOARD:{
             // 遥控器离开悬浮模式或传感器失效
-            if (!rc_data.is_hover_mode || !odom_is_received(now_time)){
+            if (!rc_is_received(now_time) || !rc_data.is_hover_mode || !odom_is_received(now_time)){
                 RCLCPP_WARN(node_->get_logger(), "返回 POSITION 模式！");
                 state = POSITION;
                 trigger_flag.data = false;
@@ -263,7 +263,7 @@ void CtrlFSM::FSM(){
 
         case AUTO_LAND:{
             // 如果定位丢失或遥控器没有处于悬浮模式，则取消着陆，返回位置模式
-            if (!rc_data.is_hover_mode || !odom_is_received(now_time)){
+            if (!rc_is_received(now_time) || !rc_data.is_hover_mode || !odom_is_received(now_time)){
                 RCLCPP_WARN(node_->get_logger(), "着陆取消，返回 POSITION！");
                 state = POSITION;
                 switch_to_offboard(now_time, false);
@@ -345,7 +345,7 @@ void CtrlFSM::FSM(){
 
 // 判断 RC 数据是否有效
 bool CtrlFSM::rc_is_received(rclcpp::Time& now_time){
-    return (now_time - rc_data.rcv_stamp).seconds() < param_.msg_timeout.rc;
+    return rc_data.is_fresh(now_time, param_.msg_timeout.rc);
 }
 
 // 判断 Odom 数据是否有效
@@ -451,7 +451,7 @@ bool CtrlFSM::arm_to_disarm(rclcpp::Time& now_time, bool arm)
 
         if (!arm_target &&
             state_data.current_state.arming_state ==
-            px4_msgs::msg::VehicleStatus::ARMING_STATE_STANDBY){
+            px4_msgs::msg::VehicleStatus::ARMING_STATE_DISARMED){
             RCLCPP_INFO(node_->get_logger(), "无人机上锁成功！");
             arm_in_progress = false;
             return true;
