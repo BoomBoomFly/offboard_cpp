@@ -59,10 +59,13 @@ class MockRCControlNative(Node):
         else:
             self.get_logger().warn("参数服务未就绪，仅发送 RC 触发包")
 
-        # 2. 发送空包触发回调
+        # 2. 发送符合 PX4 v1.16 RcChannels 归一化语义的有效帧
         msg = RcChannels()
         msg.timestamp = int(self.get_clock().now().nanoseconds / 1000)
-        msg.channels = [1500.0] * 18 
+        msg.timestamp_last_valid = msg.timestamp
+        msg.channels = [0.0] * 18
+        msg.channel_count = 18
+        msg.signal_lost = False
         
         self.rc_pub.publish(msg)
         

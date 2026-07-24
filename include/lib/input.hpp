@@ -53,11 +53,13 @@ public:
 
     rclcpp::Time rcv_stamp;                 // 接收时间戳
     px4_msgs::msg::RcChannels msg;
+    bool has_received{false};               // 是否收到过首帧
+    bool valid{false};                      // 最近一帧是否通过完整有效性检查
 
-    bool is_hover_mode;                     // 是否悬浮
-    bool enter_hover_mode;                  // 是否进入悬浮
-    bool is_offboard;                       // 是否是 Offboard
-    bool enter_offboard;                    // 是否进入 Offboard
+    bool is_hover_mode{false};              // 是否悬浮
+    bool enter_hover_mode{false};           // 是否进入悬浮
+    bool is_offboard{false};                // 是否是 Offboard
+    bool enter_offboard{false};             // 是否进入 Offboard
 
     // 阔值
     static constexpr double API_MODE_THRESHOLD_VALUE = 0.75;    // 模式切换阔值
@@ -65,9 +67,13 @@ public:
     static constexpr double DEAD_ZONE = 0.25;                   // 死区阔值
 
     RC_Data_t(const rclcpp::Node::SharedPtr& node);
-    void check_validity();                  // 检查数据有效性
+    bool check_validity() const;            // 检查最近一帧是否有效
+    bool is_fresh(const rclcpp::Time& now_time, double timeout_s) const;
     bool check_centered();                  // 建成摇杆是否回正
     void feed(px4_msgs::msg::RcChannels::SharedPtr pMsg, const Param_t& param);       // 回调
+
+private:
+    void invalidate(const char* reason);
 };
 
 // Odom 信息
