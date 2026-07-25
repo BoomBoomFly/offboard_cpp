@@ -79,6 +79,13 @@ if(BUILD_TESTING)
     rclcpp
     px4_msgs
   )
+
+  ament_add_gtest(test_topic_contract
+    test/test_topic_contract.cpp
+  )
+  target_compile_definitions(test_topic_contract PRIVATE
+    OFFBOARD_NODE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/node.cpp"
+  )
 endif()
 
 # ---------------------------------------------

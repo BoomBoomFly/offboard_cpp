@@ -1,4 +1,5 @@
 #include <node.hpp>
+#include <topics.hpp>
 
 OffboardControlNode::OffboardControlNode() : Node("offboard_control_node"){
 }
@@ -41,7 +42,7 @@ void OffboardControlNode::init(const std::shared_ptr<OffboardControlNode>& self)
         });
     
     state_sub = this->create_subscription<px4_msgs::msg::VehicleStatus>(
-        "fmu/out/vehicle_status", qos_px4, 
+        offboard_topics::kVehicleStatus, qos_px4,
         [this](px4_msgs::msg::VehicleStatus::SharedPtr msg) {
             fsm->state_data.feed(msg);
         });
