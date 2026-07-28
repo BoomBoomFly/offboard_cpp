@@ -13,14 +13,24 @@ namespace
 {
 constexpr std::int64_t kDefaultFreshnessNs = 500000000LL;
 constexpr std::int64_t kPairingWindowNs = 100000000LL;
+constexpr std::int64_t kMaxTimestampAgeUs = 500000LL;
+constexpr std::int64_t kMaxTimestampFutureUs = 100000LL;
 }
 
 OffboardControlNode::OffboardControlNode()
 : Node("offboard_control_node"),
   freshness_ns_(declare_parameter<std::int64_t>("safety.freshness_ns", kDefaultFreshnessNs)),
+  timestamp_max_age_us_(declare_parameter<std::int64_t>("safety.timestamp_max_age_us", 500000)),
+  timestamp_max_future_us_(declare_parameter<std::int64_t>("safety.timestamp_max_future_us", 100000)),
   expected_owner_(declare_parameter<std::string>("safety.expected_owner", "")),
   expected_lease_(declare_parameter<std::string>("safety.expected_lease", "")),
   expected_epoch_(declare_parameter<std::string>("safety.expected_epoch", "")),
+  timestamp_gate_(
+    static_cast<std::uint64_t>(std::max<std::int64_t>(0, timestamp_max_age_us_)),
+    static_cast<std::uint64_t>(std::max<std::int64_t>(0, timestamp_max_future_us_))),
+  timestamp_config_valid_(
+    timestamp_max_age_us_ > 0 && timestamp_max_age_us_ <= kMaxTimestampAgeUs &&
+    timestamp_max_future_us_ >= 0 && timestamp_max_future_us_ <= kMaxTimestampFutureUs),
   gate_(
     expected_owner_, expected_lease_, expected_epoch_,
     declare_parameter<bool>("takeoff_land.enable_arm", false))
@@ -31,6 +41,9 @@ OffboardControlNode::OffboardControlNode()
   status_sub_ = create_subscription<px4_msgs::msg::VehicleStatus>(
     "fmu/out/vehicle_status_v1", qos,
     [this](px4_msgs::msg::VehicleStatus::SharedPtr message) {
+      if (!accept_timestamp(offboard_cpp::TimestampStream::VEHICLE_STATUS, message->timestamp)) {
+        return;
+      }
       status_received_ns_ = steady_now_ns();
       ++vehicle_status_generation_;
       vehicle_in_offboard_ = message->nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
@@ -39,6 +52,9 @@ OffboardControlNode::OffboardControlNode()
   odom_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
     "fmu/out/vehicle_odometry", qos,
     [this](px4_msgs::msg::VehicleOdometry::SharedPtr message) {
+      if (!accept_timestamp(offboard_cpp::TimestampStream::ODOMETRY, message->timestamp)) {
+        return;
+      }
       const auto finite = [](const auto & values) {
         return std::all_of(std::begin(values), std::end(values),
           [](float value) { return std::isfinite(value); });
@@ -49,10 +65,17 @@ OffboardControlNode::OffboardControlNode()
     });
   timesync_sub_ = create_subscription<px4_msgs::msg::TimesyncStatus>(
     "fmu/out/timesync_status", qos,
-    [this](px4_msgs::msg::TimesyncStatus::SharedPtr) { timesync_received_ns_ = steady_now_ns(); });
+    [this](px4_msgs::msg::TimesyncStatus::SharedPtr message) {
+      if (accept_timesync_timestamp(message->timestamp)) {
+        timesync_received_ns_ = steady_now_ns();
+      }
+    });
   rc_sub_ = create_subscription<px4_msgs::msg::RcChannels>(
     "fmu/out/rc_channels", qos,
     [this](px4_msgs::msg::RcChannels::SharedPtr message) {
+      if (!accept_timestamp(offboard_cpp::TimestampStream::RC, message->timestamp)) {
+        return;
+      }
       rc_received_ns_ = steady_now_ns();
       rc_valid_ = !message->signal_lost && message->channel_count > 0 &&
         message->channel_count <= message->channels.size();
@@ -64,7 +87,8 @@ OffboardControlNode::OffboardControlNode()
   setpoint_sub_ = create_subscription<px4_msgs::msg::TrajectorySetpoint>(
     "offboard/cmd", qos,
     [this](px4_msgs::msg::TrajectorySetpoint::SharedPtr message) {
-      if (!finite_setpoint(*message)) {
+      if (!accept_timestamp(offboard_cpp::TimestampStream::SETPOINT, message->timestamp) ||
+          !finite_setpoint(*message)) {
         setpoint_received_ns_ = -1;
         return;
       }
@@ -75,6 +99,10 @@ OffboardControlNode::OffboardControlNode()
   mode_sub_ = create_subscription<px4_msgs::msg::OffboardControlMode>(
     "offboard/cmd_mode", qos,
     [this](px4_msgs::msg::OffboardControlMode::SharedPtr message) {
+      if (!accept_timestamp(offboard_cpp::TimestampStream::MODE, message->timestamp)) {
+        mode_received_ns_ = -1;
+        return;
+      }
       mode_ = *message;
       mode_received_ns_ = steady_now_ns();
       mode_sequence_ = authority_.sequence;
@@ -133,6 +161,38 @@ bool OffboardControlNode::finite_setpoint(const px4_msgs::msg::TrajectorySetpoin
     [](float value) { return std::isfinite(value); }) && std::isfinite(message.yaw);
 }
 
+bool OffboardControlNode::accept_timesync_timestamp(std::uint64_t timestamp_us)
+{
+  const auto result = timestamp_gate_.observe_timesync(timestamp_us);
+  if (result != offboard_cpp::TimestampResult::ACCEPTED && gate_.state() != offboard_cpp::GateState::WAIT) {
+    timestamp_fault_latched_ = true;
+  }
+  return result == offboard_cpp::TimestampResult::ACCEPTED;
+}
+
+bool OffboardControlNode::accept_timestamp(
+  offboard_cpp::TimestampStream stream, std::uint64_t timestamp_us)
+{
+  const auto result = timestamp_gate_.observe(stream, timestamp_us);
+  if (result != offboard_cpp::TimestampResult::ACCEPTED && gate_.state() != offboard_cpp::GateState::WAIT) {
+    timestamp_fault_latched_ = true;
+  }
+  return result == offboard_cpp::TimestampResult::ACCEPTED;
+}
+
+void OffboardControlNode::reset_timestamp_epoch_inputs()
+{
+  timestamp_gate_.restart_epoch();
+  timestamp_fault_latched_ = false;
+  status_received_ns_ = odom_received_ns_ = timesync_received_ns_ = rc_received_ns_ = -1;
+  setpoint_received_ns_ = mode_received_ns_ = -1;
+  rc_valid_ = false;
+  odom_valid_ = false;
+  vehicle_in_offboard_ = false;
+  vehicle_armed_ = false;
+  vehicle_status_generation_ = 0;
+}
+
 bool OffboardControlNode::graph_has_only_gate_writer() const
 {
   const auto only_this_node = [this](const char * topic) {
@@ -177,14 +237,20 @@ offboard_cpp::GateInputs OffboardControlNode::inputs() const
 {
   offboard_cpp::GateInputs result;
   const auto ros_now = now().nanoseconds();
-  result.clock_monotonic = last_ros_time_ns_ < 0 || ros_now >= last_ros_time_ns_;
-  result.vehicle_status_fresh = fresh(status_received_ns_);
-  result.odometry_fresh = fresh(odom_received_ns_) && odom_valid_;
-  result.timesync_fresh = fresh(timesync_received_ns_);
-  result.rc_fresh = fresh(rc_received_ns_) && rc_valid_;
+  result.clock_monotonic = timestamp_config_valid_ && !timestamp_fault_latched_ &&
+    (last_ros_time_ns_ < 0 || ros_now >= last_ros_time_ns_);
+  result.vehicle_status_fresh = fresh(status_received_ns_) &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::VEHICLE_STATUS);
+  result.odometry_fresh = fresh(odom_received_ns_) && odom_valid_ &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::ODOMETRY);
+  result.timesync_fresh = fresh(timesync_received_ns_) && timestamp_gate_.timesync_ready();
+  result.rc_fresh = fresh(rc_received_ns_) && rc_valid_ &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::RC);
   result.kill_fresh = fresh(kill_received_ns_);
-  result.setpoint_fresh = fresh(setpoint_received_ns_);
-  result.mode_fresh = fresh(mode_received_ns_);
+  result.setpoint_fresh = fresh(setpoint_received_ns_) &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::SETPOINT);
+  result.mode_fresh = fresh(mode_received_ns_) &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::MODE);
   result.setpoint_mode_paired = result.setpoint_fresh && result.mode_fresh &&
     setpoint_sequence_ != 0 && setpoint_sequence_ == mode_sequence_ &&
     std::llabs(setpoint_received_ns_ - mode_received_ns_) <= kPairingWindowNs;
@@ -207,6 +273,12 @@ offboard_cpp::GateInputs OffboardControlNode::inputs() const
 
 void OffboardControlNode::on_ack(const px4_msgs::msg::VehicleCommandAck::SharedPtr message)
 {
+  // Invalid ACK timestamps do not reach the observer; accept_timestamp latches
+  // timestamp_fault_latched_ outside WAIT, so the following timer tick emits
+  // no PX4 input and transitions the production gate to FAULT_LATCHED.
+  if (!accept_timestamp(offboard_cpp::TimestampStream::COMMAND_ACK, message->timestamp)) {
+    return;
+  }
   offboard_cpp::CommandAck ack;
   ack.command = message->command;
   ack.target_system = message->target_system;
@@ -227,7 +299,12 @@ void OffboardControlNode::on_timer()
   offboard_cpp::GateDecision result;
   if (recovery_requested_) {
     recovery_requested_ = false;
-    result = gate_.request_manual_recovery(steady_now_ns(), current_inputs);
+    if (timestamp_fault_latched_) {
+      reset_timestamp_epoch_inputs();
+      result = gate_.tick(steady_now_ns(), inputs());
+    } else {
+      result = gate_.request_manual_recovery(steady_now_ns(), current_inputs);
+    }
   } else if (activation_requested_) {
     activation_requested_ = false;
     result = gate_.request_manual_activation(steady_now_ns(), current_inputs);

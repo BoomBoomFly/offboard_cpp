@@ -17,6 +17,7 @@
 
 #include <safety_gate.hpp>
 #include <safety_gate_adapter.hpp>
+#include <timestamp_gate.hpp>
 
 class OffboardControlNode : public rclcpp::Node
 {
@@ -37,6 +38,9 @@ private:
   std::int64_t steady_now_ns() const;
   bool fresh(std::int64_t received_ns) const;
   bool finite_setpoint(const px4_msgs::msg::TrajectorySetpoint & message) const;
+  bool accept_timesync_timestamp(std::uint64_t timestamp_us);
+  bool accept_timestamp(offboard_cpp::TimestampStream stream, std::uint64_t timestamp_us);
+  void reset_timestamp_epoch_inputs();
   bool graph_has_only_gate_writer() const;
   bool parse_authority(const std::string & value, AuthorityRecord * record) const;
   offboard_cpp::GateInputs inputs() const;
@@ -44,9 +48,13 @@ private:
   void on_ack(const px4_msgs::msg::VehicleCommandAck::SharedPtr message);
 
   const std::int64_t freshness_ns_;
+  const std::int64_t timestamp_max_age_us_;
+  const std::int64_t timestamp_max_future_us_;
   std::string expected_owner_;
   std::string expected_lease_;
   std::string expected_epoch_;
+  offboard_cpp::TimestampGate timestamp_gate_;
+  bool timestamp_config_valid_{false};
   offboard_cpp::SafetyGate gate_;
   std::unique_ptr<offboard_cpp::SafetyGateAdapter> adapter_;
 
@@ -69,6 +77,7 @@ private:
   std::uint64_t vehicle_status_generation_{0};
   bool rc_valid_{false};
   bool odom_valid_{false};
+  bool timestamp_fault_latched_{false};
   bool physical_kill_{false};
   bool manual_arm_enable_{false};
   bool recovery_requested_{false};

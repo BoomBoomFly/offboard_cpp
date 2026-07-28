@@ -2,6 +2,7 @@
 #include <iostream>
 
 #include <safety_gate.hpp>
+#include <timestamp_gate.hpp>
 
 using offboard_cpp::AckResult;
 using offboard_cpp::CommandAck;
@@ -9,6 +10,9 @@ using offboard_cpp::CommandKind;
 using offboard_cpp::GateInputs;
 using offboard_cpp::GateState;
 using offboard_cpp::SafetyGate;
+using offboard_cpp::TimestampGate;
+using offboard_cpp::TimestampResult;
+using offboard_cpp::TimestampStream;
 
 namespace
 {
@@ -217,6 +221,37 @@ void test_arm_requires_explicit_enable_and_manual_gate()
   ++inputs.vehicle_status_generation;
   assert(armed.tick(1140000000LL, inputs).state == GateState::ACTIVE);
 }
+
+void test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs()
+{
+  // TimesyncStatus.timestamp is the PX4 v1.16 boot-usec baseline for every
+  // stream exercised below; a restart creates a new, non-inheriting epoch.
+  TimestampGate timestamps(500, 100);
+  assert(timestamps.observe_timesync(0) == TimestampResult::ZERO);
+  assert(timestamps.observe_timesync(1000) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe_timesync(1000) == TimestampResult::FROZEN);
+  assert(timestamps.observe_timesync(999) == TimestampResult::BACKWARD);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 0) == TimestampResult::ZERO);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::ACCEPTED);
+  assert(timestamps.current(TimestampStream::VEHICLE_STATUS));
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::FROZEN);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 999) == TimestampResult::BACKWARD);
+  assert(timestamps.observe(TimestampStream::MODE, 1101) == TimestampResult::FUTURE);
+  assert(timestamps.observe_timesync(2000) == TimestampResult::ACCEPTED);
+  assert(!timestamps.current(TimestampStream::VEHICLE_STATUS));
+  assert(timestamps.observe(TimestampStream::ODOMETRY, 1499) == TimestampResult::STALE);
+
+  timestamps.restart_epoch();
+  assert(!timestamps.timesync_ready());
+  assert(!timestamps.current(TimestampStream::VEHICLE_STATUS));
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::NO_TIMESYNC);
+  assert(timestamps.observe_timesync(100) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::FUTURE);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 100) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe_timesync(101) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 100) == TimestampResult::FROZEN);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 101) == TimestampResult::ACCEPTED);
+}
 }  // namespace
 
 int main()
@@ -226,6 +261,7 @@ int main()
   test_every_readiness_failure_and_restart_is_zero_output();
   test_manual_recovery_never_auto_active();
   test_arm_requires_explicit_enable_and_manual_gate();
+  test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs();
   std::cout << "safety gate tests passed\n";
   return 0;
 }

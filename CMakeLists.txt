@@ -38,6 +38,7 @@ add_library(px4_offboard_lib
   src/lib/param.cpp
   src/lib/input.cpp
   src/safety_gate.cpp
+  src/timestamp_gate.cpp
   src/safety_gate_adapter.cpp
 )
 
