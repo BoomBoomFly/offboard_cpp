@@ -30,20 +30,15 @@ include_directories(
   ${EIGEN3_INCLUDE_DIRS}
 )
 
-# 编译时宏定义
-# 没有遥控器时测试 RC 用
-add_compile_definitions(TEXT_RC)
-# 处理机体坐标系速度，如果 Odom 里的速度是相对于机体坐标系的，需要旋转到世界坐标系
-# add_compile_definitions(VEL_IN_BODY)
-# 打印外部命令时间戳用
-# add_compile_definitions(TEXT_OFFBOARD)
-
-# ---------------------------------------------
-# 构建基础控制库（包含 FSM、输入处理、参数管理）
+# Production has no mock-RC compilation path.  Mock inputs belong only in an
+# isolated test domain and are not part of this package target.
+# The former direct-publisher state machine is intentionally removed from the
+# build; SafetyGateAdapter is now the only control-input writer.
 add_library(px4_offboard_lib
   src/lib/param.cpp
   src/lib/input.cpp
-  src/lib/CtrlFSM.cpp
+  src/safety_gate.cpp
+  src/safety_gate_adapter.cpp
 )
 
 target_include_directories(px4_offboard_lib PUBLIC
@@ -83,9 +78,13 @@ if(BUILD_TESTING)
   ament_add_gtest(test_topic_contract
     test/test_topic_contract.cpp
   )
-  target_compile_definitions(test_topic_contract PRIVATE
-    OFFBOARD_NODE_SOURCE="${CMAKE_CURRENT_SOURCE_DIR}/src/node.cpp"
+  target_link_libraries(test_topic_contract px4_offboard_lib)
+
+  add_executable(test_safety_gate
+    test/test_safety_gate.cpp
   )
+  target_link_libraries(test_safety_gate px4_offboard_lib)
+  add_test(NAME test_safety_gate COMMAND test_safety_gate)
 endif()
 
 # ---------------------------------------------
@@ -102,6 +101,7 @@ ament_target_dependencies(offboard_node
   rclcpp
   rcl_interfaces
   std_msgs
+  px4_msgs
 )
 
 # ---------------------------------------------

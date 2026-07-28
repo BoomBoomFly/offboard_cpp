@@ -8,7 +8,7 @@ Param_t::Param_t(){
     msg_timeout.bat = 0.5;
 
     takeoff_land.enable = true;
-    takeoff_land.enable_arm = true;
+    takeoff_land.enable_arm = false;
     takeoff_land.speed = 0.3;
     takeoff_land.height = 1.0;
 
@@ -86,4 +86,3 @@ rcl_interfaces::msg::SetParametersResult Param_t::updateDynamicParams(
     }
     return result;
 }
-

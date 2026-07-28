@@ -11,7 +11,7 @@
     # 自动起飞与降落设置
     takeoff_land:
       enable: true        # 是否启用自动起降逻辑
-      enable_arm: true    # 起飞前是否由脚本自动执行 Arm (解锁)
+      enable_arm: false   # production defaults disarmed; explicit reviewed enable required
       speed: 0.3          # 起飞/降落的垂直速度 (m/s)
       height: 1.0         # 目标起飞高度 (m)
 

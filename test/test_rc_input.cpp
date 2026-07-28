@@ -3,7 +3,7 @@
 #include <limits>
 #include <memory>
 
-#include <lib/CtrlFSM.hpp>
+#include <lib/input.hpp>
 
 namespace
 {
@@ -45,12 +45,12 @@ protected:
 
 TEST_F(RCInputTest, NoFirstFrameIsInvalid)
 {
-    CtrlFSM fsm(param, node);
+    RC_Data_t rc(node);
     auto now = node->now();
 
-    EXPECT_FALSE(fsm.rc_data.has_received);
-    EXPECT_FALSE(fsm.rc_data.check_validity());
-    EXPECT_FALSE(fsm.rc_is_received(now));
+    EXPECT_FALSE(rc.has_received);
+    EXPECT_FALSE(rc.check_validity());
+    EXPECT_FALSE(rc.is_fresh(now, param.msg_timeout.rc));
 }
 
 TEST_F(RCInputTest, SignalLostFrameIsInvalid)
@@ -92,16 +92,16 @@ TEST_F(RCInputTest, ConfiguredChannelIndexOutOfBoundsIsInvalid)
 
 TEST_F(RCInputTest, StaleFrameIsInvalid)
 {
-    CtrlFSM fsm(param, node);
+    RC_Data_t rc(node);
     auto message = valid_message();
-    fsm.rc_data.feed(message, param);
+    rc.feed(message, param);
     auto fresh_time =
-        fsm.rc_data.rcv_stamp + rclcpp::Duration::from_seconds(param.msg_timeout.rc / 2.0);
+        rc.rcv_stamp + rclcpp::Duration::from_seconds(param.msg_timeout.rc / 2.0);
     auto stale_time =
-        fsm.rc_data.rcv_stamp + rclcpp::Duration::from_seconds(param.msg_timeout.rc + 0.01);
+        rc.rcv_stamp + rclcpp::Duration::from_seconds(param.msg_timeout.rc + 0.01);
 
-    EXPECT_TRUE(fsm.rc_is_received(fresh_time));
-    EXPECT_FALSE(fsm.rc_is_received(stale_time));
+    EXPECT_TRUE(rc.is_fresh(fresh_time, param.msg_timeout.rc));
+    EXPECT_FALSE(rc.is_fresh(stale_time, param.msg_timeout.rc));
 }
 
 TEST_F(RCInputTest, NonFiniteOrOutOfRangeChannelIsInvalid)
