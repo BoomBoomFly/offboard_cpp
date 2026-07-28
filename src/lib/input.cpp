@@ -142,20 +142,6 @@ void RC_Data_t::feed(px4_msgs::msg::RcChannels::SharedPtr pMsg, const Param_t& p
 
     mode = static_cast<double>(msg.channels[param.rc_debug.ch_mode]);
     gear = static_cast<double>(msg.channels[param.rc_debug.ch_gear]);
-    #ifdef TEXT_RC
-        double mock_mode = 0.0;
-        double mock_gear = 0.0;
-        node_->get_parameter_or("mock_rc_mode", mock_mode, 0.0);
-        node_->get_parameter_or("mock_rc_gear", mock_gear, 0.0);
-        if (!std::isfinite(mock_mode) || !std::isfinite(mock_gear) ||
-            mock_mode < -1.0 || mock_mode > 1.0 ||
-            mock_gear < -1.0 || mock_gear > 1.0){
-            invalidate("mock RC switch is non-finite or outside normalized range");
-            return;
-        }
-        mode = mock_mode;
-        gear = mock_gear;
-    #endif
     // 这里归一到了 [0, 1] ，如有别的需求，自行进行修改
     p = (static_cast<double>(msg.channels[param.rc_debug.ch_p]) + 1.0) / 2.0;
     i = (static_cast<double>(msg.channels[param.rc_debug.ch_i]) + 1.0) / 2.0;
