@@ -1,5 +1,7 @@
 #include <node.hpp>
 
+#include <graph_guard.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -195,13 +197,7 @@ void OffboardControlNode::reset_timestamp_epoch_inputs()
 
 bool OffboardControlNode::graph_has_only_gate_writer() const
 {
-  const auto only_this_node = [this](const char * topic) {
-    const auto endpoints = get_publishers_info_by_topic(topic);
-    return endpoints.size() == 1 && endpoints.front().node_name() == get_name();
-  };
-  return only_this_node("/fmu/in/trajectory_setpoint") &&
-         only_this_node("/fmu/in/offboard_control_mode") &&
-         only_this_node("/fmu/in/vehicle_command");
+  return offboard_cpp::graph_has_only_gate_writer(*this);
 }
 
 bool OffboardControlNode::parse_authority(const std::string & value, AuthorityRecord * record) const

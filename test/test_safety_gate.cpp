@@ -183,6 +183,24 @@ void test_manual_recovery_never_auto_active()
   assert(value.tick(6, inputs).state == GateState::PRESTREAM);
 }
 
+void test_activation_and_ack_timestamps_cannot_rollback()
+{
+  auto inputs = ready_inputs();
+  auto value = gate();
+  assert(value.request_manual_activation(10, inputs).state == GateState::WAIT);
+  const auto rollback = value.tick(9, inputs);
+  assert(rollback.fault_latched && !rollback.publish_setpoint && !rollback.publish_mode &&
+    rollback.command == CommandKind::NONE);
+
+  auto pending = gate(true);
+  prestream_to_mode(pending, inputs);
+  assert(!pending.observe_ack(
+    1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority).fault_latched);
+  const auto ack_rollback = pending.tick(1049999999LL, inputs);
+  assert(ack_rollback.fault_latched && !ack_rollback.publish_setpoint && !ack_rollback.publish_mode &&
+    ack_rollback.command == CommandKind::NONE);
+}
+
 void test_arm_requires_explicit_enable_and_manual_gate()
 {
   auto inputs = ready_inputs();
@@ -260,6 +278,7 @@ int main()
   test_ack_reject_timeout_command_and_sequence_fail_closed();
   test_every_readiness_failure_and_restart_is_zero_output();
   test_manual_recovery_never_auto_active();
+  test_activation_and_ack_timestamps_cannot_rollback();
   test_arm_requires_explicit_enable_and_manual_gate();
   test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs();
   std::cout << "safety gate tests passed\n";

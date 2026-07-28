@@ -157,6 +157,7 @@ GateDecision SafetyGate::observe_ack(
       pending_command_ == CommandKind::NONE || monotonic_ns >= pending_deadline_ns_) {
     return latch("unexpected or late ACK");
   }
+  last_tick_ns_ = monotonic_ns;
   const std::uint32_t expected_command = pending_command_ == CommandKind::SET_MODE_OFFBOARD
     ? kVehicleCmdDoSetMode : kVehicleCmdArmDisarm;
   if (!authority_matches(authority) || authority.sequence != pending_sequence_ ||
@@ -200,6 +201,7 @@ GateDecision SafetyGate::request_manual_activation(
   if (state_ != GateState::WAIT || !ready(inputs) || monotonic_ns < last_tick_ns_) {
     return decision(false, false, CommandKind::NONE, "manual activation denied");
   }
+  last_tick_ns_ = monotonic_ns;
   manual_activation_granted_ = true;
   return decision(false, false, CommandKind::NONE, "manual activation acknowledged");
 }
