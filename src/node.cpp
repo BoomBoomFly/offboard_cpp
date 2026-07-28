@@ -5,92 +5,86 @@ OffboardControlNode::OffboardControlNode() : Node("offboard_control_node"){
 }
 
 void OffboardControlNode::init(const std::shared_ptr<OffboardControlNode>& self) {
-    // 获取参数配置
-    param.getStaticParam(self);
-    param.initDynamicParams(self);
-    param_cb_ = this->add_on_set_parameters_callback(
-        [this, self](const std::vector<rclcpp::Parameter>& parameters) {
-            return param.updateDynamicParams(self, parameters);
-        });
-    #ifdef TEXT_RC
-    this->declare_parameter("mock_rc_mode", 0.0);
-    this->declare_parameter("mock_rc_gear", 0.0);
-    #endif
-    // 创建状态机
-    fsm = std::make_unique<CtrlFSM>(param, self);
+    (void)self;
+    // This is intentionally false by default.  The adapter additionally has
+    // no production authority envelope, so no automatic arm path exists.
+    this->declare_parameter<bool>("takeoff_land.enable_arm", false);
+    safety_gate_ = std::make_unique<SafetyGateAdapter>(*this);
+    // SafetyGateAdapter owns TimestampStream::VEHICLE_STATUS,
+    // TimestampStream::ODOMETRY, TimestampStream::RC,
+    // TimestampStream::SETPOINT, TimestampStream::MODE and
+    // TimestampStream::COMMAND_ACK validation for these callbacks.
 
     // 定义 QoS 策略
     auto qos_px4 = rclcpp::QoS(rclcpp::KeepLast(1))
                        .best_effort()
                        .durability_volatile();
     
-    // 初始化发布者
-    fsm->offboard_pub = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>(
-        "fmu/in/trajectory_setpoint", qos_px4);
-    fsm->trigger_pub = this->create_publisher<std_msgs::msg::Bool>(
-        "offboard/trigger", qos_px4);
-    fsm->offboard_mode_pub = this->create_publisher<px4_msgs::msg::OffboardControlMode>(
-        "fmu/in/offboard_control_mode", qos_px4);
-    fsm->vehicle_com_pub = this->create_publisher<px4_msgs::msg::VehicleCommand>(
-        "fmu/in/vehicle_command", qos_px4);
-
-    // 初始化订阅者
     odom_sub = this->create_subscription<px4_msgs::msg::VehicleOdometry>(
         "fmu/out/vehicle_odometry", qos_px4, 
         [this](px4_msgs::msg::VehicleOdometry::SharedPtr msg) {
-            fsm->odom_data.feed(msg, param);
+            safety_gate_->observe_odometry(*msg, this->now().nanoseconds() / 1000);
         });
     
     state_sub = this->create_subscription<px4_msgs::msg::VehicleStatus>(
         offboard_topics::kVehicleStatus, qos_px4,
         [this](px4_msgs::msg::VehicleStatus::SharedPtr msg) {
-            fsm->state_data.feed(msg);
+            safety_gate_->observe_vehicle_status(*msg, this->now().nanoseconds() / 1000);
+        });
+
+    timesync_sub = this->create_subscription<px4_msgs::msg::TimesyncStatus>(
+        "fmu/out/timesync_status", qos_px4,
+        [this](px4_msgs::msg::TimesyncStatus::SharedPtr msg) {
+            safety_gate_->observe_timesync(*msg, this->now().nanoseconds() / 1000);
         });
 
     rc_sub = this->create_subscription<px4_msgs::msg::RcChannels>(
         "fmu/out/rc_channels", qos_px4, 
         [this](px4_msgs::msg::RcChannels::SharedPtr msg) {
-            fsm->rc_data.feed(msg, param);
+            safety_gate_->observe_rc(*msg, this->now().nanoseconds() / 1000);
         });
 
     offboard_sub = this->create_subscription<px4_msgs::msg::TrajectorySetpoint>(
         "offboard/cmd", qos_px4, 
         [this](px4_msgs::msg::TrajectorySetpoint::SharedPtr msg) {
-            fsm->offboard_data.feed(msg);
+            safety_gate_->observe_setpoint(*msg, this->now().nanoseconds() / 1000);
         });
 
     offboard_mode_sub = this->create_subscription<px4_msgs::msg::OffboardControlMode>(
         "offboard/cmd_mode", qos_px4, 
         [this](px4_msgs::msg::OffboardControlMode::SharedPtr msg) {
-            fsm->offboard_mode_data.feed(msg);
+            safety_gate_->observe_mode(*msg, this->now().nanoseconds() / 1000);
         });
 
     battery_sub = this->create_subscription<px4_msgs::msg::BatteryStatus>(
         "fmu/out/battery_status", qos_px4, 
         [this](px4_msgs::msg::BatteryStatus::SharedPtr msg) {
-            fsm->battery_data.feed(msg);
+            safety_gate_->observe_battery(*msg, this->now().nanoseconds() / 1000);
         });
 
-    takeoff_land_sub = this->create_subscription<std_msgs::msg::UInt8>(
-        "offboard/takeoff_land", qos_px4, 
-        [this](std_msgs::msg::UInt8::SharedPtr msg) {
-            fsm->takeoff_land_data.feed_takeoff_land(msg);
-        });
-
-    land_detected_sub = this->create_subscription<px4_msgs::msg::VehicleLandDetected>(
-        "fmu/out/vehicle_land_detected", qos_px4, 
-        [this](px4_msgs::msg::VehicleLandDetected::SharedPtr msg) {
-            fsm->takeoff_land_data.feed_landed(msg);
+    ack_sub = this->create_subscription<px4_msgs::msg::VehicleCommandAck>(
+        "fmu/out/vehicle_command_ack", qos_px4,
+        [this](px4_msgs::msg::VehicleCommandAck::SharedPtr msg) {
+            safety_gate_->observe_ack(*msg, this->now().nanoseconds() / 1000);
         });
 
     // 创建定时器，定期调用状态机
     timer = this->create_wall_timer(
         std::chrono::milliseconds(20),  // 50Hz
         [this]() {
-            fsm->FSM();
+            if (safety_gate_->timestamp_fault_latched_() ||
+                !safety_gate_->timestamp_config_valid_()) {
+                return;
+            }
+            safety_gate_->tick(this->now().nanoseconds() / 1000,
+                               graph_has_only_gate_writer());
         });
 
     RCLCPP_INFO(this->get_logger(), "Offboard Control Node initialized");
+}
+
+bool OffboardControlNode::graph_has_only_gate_writer() const {
+    return safety_gate_->graph_has_only_gate_writer();
 }
 
 int main(int argc, char** argv) {
