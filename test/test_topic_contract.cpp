@@ -12,4 +12,10 @@ TEST(TopicContractTest, VehicleStatusMatchesPx4V1162BridgeContract)
         "fmu/out/vehicle_status_v1");
 }
 
+TEST(TopicContractTest, IntegrationTopicsHaveDedicatedMeanings)
+{
+    EXPECT_STREQ(offboard_topics::kMissionStart, "/mission/start");
+    EXPECT_STREQ(offboard_topics::kUavMissionState, "/uav/mission_state");
+}
+
 }  // namespace
