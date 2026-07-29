@@ -15,6 +15,9 @@ enum class GateState {
   REQUEST_MODE,
   REQUEST_ARM,
   ACTIVE,
+  REQUEST_LAND,
+  LANDING,
+  REQUEST_DISARM,
   STANDBY_DISARMED,
   FAULT_LATCHED,
 };
@@ -23,10 +26,21 @@ enum class CommandKind {
   NONE,
   SET_MODE_OFFBOARD,
   ARM,
+  LAND,
+  DISARM,
+};
+
+enum class MissionRequest : std::uint8_t {
+  NONE = 0,
+  LAND_HOME = 1,
+  DISARM = 2,
+  REARM = 3,
+  LAND_PLATFORM = 4,
 };
 
 enum class AckResult {
   ACCEPTED,
+  IN_PROGRESS,
   REJECTED,
   TIMEOUT,
   MISMATCH,
@@ -55,8 +69,11 @@ struct GateInputs {
   bool kill_latched{false};
   bool vehicle_in_offboard{false};
   bool vehicle_armed{false};
+  bool landing_confirmed{false};
   std::uint64_t vehicle_status_generation{0};
   bool manual_arm_enable{false};
+  MissionRequest mission_request{MissionRequest::NONE};
+  std::uint64_t mission_request_generation{0};
   Authority authority{};
 };
 
@@ -83,6 +100,7 @@ class SafetyGate
 public:
   static constexpr std::uint16_t kVehicleCmdDoSetMode = 176;
   static constexpr std::uint16_t kVehicleCmdArmDisarm = 400;
+  static constexpr std::uint16_t kVehicleCmdNavLand = 21;
   static constexpr std::uint8_t kTargetSystem = 1;
   static constexpr std::uint8_t kTargetComponent = 1;
 
@@ -107,6 +125,8 @@ public:
 private:
   bool ready(const GateInputs & inputs) const;
   bool authority_matches(const Authority & authority) const;
+  bool consume_request(const GateInputs & inputs, MissionRequest request);
+  void begin_rearm(std::int64_t now_ns);
   GateDecision decision(bool setpoint, bool mode, CommandKind command, const char * reason) const;
   GateDecision latch(const char * reason);
   void begin_pending(CommandKind command, std::int64_t now_ns, std::uint64_t sequence);
@@ -123,10 +143,14 @@ private:
   CommandKind pending_command_{CommandKind::NONE};
   std::uint64_t pending_sequence_{0};
   std::int64_t pending_deadline_ns_{-1};
+  std::int64_t confirmation_deadline_ns_{-1};
   bool mode_acknowledged_{false};
   bool arm_acknowledged_{false};
+  bool disarm_acknowledged_{false};
   std::uint64_t mode_ack_status_generation_{0};
   std::uint64_t arm_ack_status_generation_{0};
+  std::uint64_t disarm_ack_status_generation_{0};
+  std::uint64_t last_request_generation_{0};
   bool manual_activation_granted_{false};
 };
 

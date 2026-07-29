@@ -12,8 +12,36 @@
     takeoff_land:
       enable: true        # 是否启用自动起降逻辑
       enable_arm: false   # production defaults disarmed; explicit reviewed enable required
-      speed: 0.3          # 起飞/降落的垂直速度 (m/s)
-      height: 1.0         # 目标起飞高度 (m)
+
+    # 完整任务轨迹参数（由 flight_sequence_node 直接读取）
+    mission:
+      task_id: 1
+      takeoff_speed: 0.5
+      cruise_speed: 1.0
+      home_land_speed: 0.3
+      platform_land_speed: 0.2
+      takeoff_height: 1.0
+      hover_seconds: 3.0
+      platform_hold_seconds: 5.0
+      position_tolerance: 0.2
+      home_surface_z: 0.0
+      platform_surface_z: 0.0
+      follow_offset_x: 0.0
+      follow_offset_y: 0.0
+      yaw: 0.0
+
+    safety:
+      freshness_ns: 500000000
+      timestamp_max_age_us: 500000
+      timestamp_max_future_us: 100000
+
+    landing:
+      stable_ns: 1000000000
+      max_vertical_speed: 0.15
+      height_tolerance: 0.25
+
+    authority:
+      input_freshness_ns: 500000000
 
     # 安全阈值与保护
     low_voltage: 13.2     # 低电压报警阈值 (针对 4S 电池)

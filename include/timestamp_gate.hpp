@@ -20,6 +20,7 @@ enum class TimestampStream : std::size_t {
   SETPOINT,
   MODE,
   COMMAND_ACK,
+  LAND_DETECTED,
   COUNT,
 };
 

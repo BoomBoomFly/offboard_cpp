@@ -24,6 +24,8 @@ OffboardControlNode::OffboardControlNode()
   freshness_ns_(declare_parameter<std::int64_t>("safety.freshness_ns", kDefaultFreshnessNs)),
   timestamp_max_age_us_(declare_parameter<std::int64_t>("safety.timestamp_max_age_us", 500000)),
   timestamp_max_future_us_(declare_parameter<std::int64_t>("safety.timestamp_max_future_us", 100000)),
+  home_surface_z_(declare_parameter<double>("mission.home_surface_z", 0.0)),
+  platform_surface_z_(declare_parameter<double>("mission.platform_surface_z", 0.0)),
   expected_owner_(declare_parameter<std::string>("safety.expected_owner", "")),
   expected_lease_(declare_parameter<std::string>("safety.expected_lease", "")),
   expected_epoch_(declare_parameter<std::string>("safety.expected_epoch", "")),
@@ -35,7 +37,11 @@ OffboardControlNode::OffboardControlNode()
     timestamp_max_future_us_ >= 0 && timestamp_max_future_us_ <= kMaxTimestampFutureUs),
   gate_(
     expected_owner_, expected_lease_, expected_epoch_,
-    declare_parameter<bool>("takeoff_land.enable_arm", false))
+    declare_parameter<bool>("takeoff_land.enable_arm", false)),
+  landing_monitor_(
+    declare_parameter<std::int64_t>("landing.stable_ns", 1000000000LL),
+    declare_parameter<double>("landing.max_vertical_speed", 0.15),
+    declare_parameter<double>("landing.height_tolerance", 0.25))
 {
   const auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
   adapter_ = std::make_unique<offboard_cpp::SafetyGateAdapter>(*this, qos);
@@ -63,6 +69,10 @@ OffboardControlNode::OffboardControlNode()
       };
       odom_valid_ = finite(message->position) && finite(message->velocity) &&
         finite(message->q) && finite(message->angular_velocity);
+      if (odom_valid_) {
+        altitude_z_ = message->position[2];
+        vertical_speed_ = message->velocity[2];
+      }
       odom_received_ns_ = steady_now_ns();
     });
   timesync_sub_ = create_subscription<px4_msgs::msg::TimesyncStatus>(
@@ -112,12 +122,21 @@ OffboardControlNode::OffboardControlNode()
   ack_sub_ = create_subscription<px4_msgs::msg::VehicleCommandAck>(
     "fmu/out/vehicle_command_ack", qos,
     std::bind(&OffboardControlNode::on_ack, this, std::placeholders::_1));
+  land_sub_ = create_subscription<px4_msgs::msg::VehicleLandDetected>(
+    "fmu/out/vehicle_land_detected", qos,
+    [this](px4_msgs::msg::VehicleLandDetected::SharedPtr message) {
+      if (!accept_timestamp(offboard_cpp::TimestampStream::LAND_DETECTED, message->timestamp)) {
+        return;
+      }
+      vehicle_landed_ = message->landed;
+      land_received_ns_ = steady_now_ns();
+    });
   authority_sub_ = create_subscription<std_msgs::msg::String>(
     "offboard/authority", qos,
     [this](std_msgs::msg::String::SharedPtr message) {
       AuthorityRecord parsed;
       if (!parse_authority(message->data, &parsed) ||
-          (authority_.sequence != 0 && parsed.sequence <= authority_.sequence)) {
+          (authority_.sequence != 0 && parsed.sequence < authority_.sequence)) {
         authority_.received_ns = -1;
         return;
       }
@@ -138,10 +157,39 @@ OffboardControlNode::OffboardControlNode()
     });
   activation_sub_ = create_subscription<std_msgs::msg::Bool>(
     "offboard/manual_enable", qos,
-    [this](std_msgs::msg::Bool::SharedPtr message) { activation_requested_ = message->data; });
+    [this](std_msgs::msg::Bool::SharedPtr message) {
+      activation_requested_ = message->data && !last_activation_signal_;
+      last_activation_signal_ = message->data;
+    });
   recovery_sub_ = create_subscription<std_msgs::msg::Bool>(
     "offboard/manual_recovery", qos,
-    [this](std_msgs::msg::Bool::SharedPtr message) { recovery_requested_ = message->data; });
+    [this](std_msgs::msg::Bool::SharedPtr message) {
+      recovery_requested_ = message->data && !last_recovery_signal_;
+      last_recovery_signal_ = message->data;
+    });
+  command_request_sub_ = create_subscription<std_msgs::msg::UInt8>(
+    "offboard/command_request", qos,
+    [this](std_msgs::msg::UInt8::SharedPtr message) {
+      switch (static_cast<offboard_cpp::MissionRequest>(message->data)) {
+        case offboard_cpp::MissionRequest::LAND_HOME:
+          contact_surface_z_ = home_surface_z_;
+          break;
+        case offboard_cpp::MissionRequest::LAND_PLATFORM:
+          contact_surface_z_ = platform_surface_z_;
+          break;
+        case offboard_cpp::MissionRequest::DISARM:
+        case offboard_cpp::MissionRequest::REARM:
+          break;
+        case offboard_cpp::MissionRequest::NONE:
+        default:
+          RCLCPP_ERROR(get_logger(), "Rejected non-whitelisted mission request: %u", message->data);
+          return;
+      }
+      mission_request_ = static_cast<offboard_cpp::MissionRequest>(message->data);
+      ++mission_request_generation_;
+    });
+  landing_confirmed_pub_ = create_publisher<std_msgs::msg::Bool>(
+    "offboard/landing_confirmed", qos);
   timer_ = create_wall_timer(std::chrono::milliseconds(20), std::bind(&OffboardControlNode::on_timer, this));
 }
 
@@ -187,12 +235,15 @@ void OffboardControlNode::reset_timestamp_epoch_inputs()
   timestamp_gate_.restart_epoch();
   timestamp_fault_latched_ = false;
   status_received_ns_ = odom_received_ns_ = timesync_received_ns_ = rc_received_ns_ = -1;
-  setpoint_received_ns_ = mode_received_ns_ = -1;
+  setpoint_received_ns_ = mode_received_ns_ = land_received_ns_ = -1;
   rc_valid_ = false;
   odom_valid_ = false;
   vehicle_in_offboard_ = false;
   vehicle_armed_ = false;
   vehicle_status_generation_ = 0;
+  vehicle_landed_ = false;
+  landing_confirmed_ = false;
+  landing_monitor_.reset();
 }
 
 bool OffboardControlNode::graph_has_only_gate_writer() const
@@ -253,8 +304,11 @@ offboard_cpp::GateInputs OffboardControlNode::inputs() const
   result.kill_latched = physical_kill_;
   result.vehicle_in_offboard = vehicle_in_offboard_;
   result.vehicle_armed = vehicle_armed_;
+  result.landing_confirmed = landing_confirmed_;
   result.vehicle_status_generation = vehicle_status_generation_;
   result.manual_arm_enable = manual_arm_enable_ && fresh(manual_arm_received_ns_);
+  result.mission_request = mission_request_;
+  result.mission_request_generation = mission_request_generation_;
   result.authority.fresh = fresh(authority_.received_ns);
   // The signed/approved authority heartbeat is necessary but not sufficient:
   // continuously reject a second ROS writer on any PX4 control input as well.
@@ -281,8 +335,15 @@ void OffboardControlNode::on_ack(const px4_msgs::msg::VehicleCommandAck::SharedP
   ack.target_component = message->target_component;
   ack.from_external = message->from_external;
   ack.status_generation = vehicle_status_generation_;
-  ack.result = message->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED
-    ? offboard_cpp::AckResult::ACCEPTED : offboard_cpp::AckResult::REJECTED;
+  if (message->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED) {
+    ack.result = offboard_cpp::AckResult::ACCEPTED;
+  } else if (
+    message->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS)
+  {
+    ack.result = offboard_cpp::AckResult::IN_PROGRESS;
+  } else {
+    ack.result = offboard_cpp::AckResult::REJECTED;
+  }
   const auto result = gate_.observe_ack(steady_now_ns(), ack, inputs().authority);
   if (result.fault_latched) {
     RCLCPP_ERROR(get_logger(), "Offboard gate latched on ACK: %s", result.reason);
@@ -291,21 +352,38 @@ void OffboardControlNode::on_ack(const px4_msgs::msg::VehicleCommandAck::SharedP
 
 void OffboardControlNode::on_timer()
 {
+  const auto steady_now = steady_now_ns();
+  offboard_cpp::LandingObservation landing;
+  landing.land_detected_fresh = fresh(land_received_ns_) &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::LAND_DETECTED);
+  landing.vehicle_status_fresh = fresh(status_received_ns_) &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::VEHICLE_STATUS);
+  landing.odometry_fresh = fresh(odom_received_ns_) && odom_valid_ &&
+    timestamp_gate_.current(offboard_cpp::TimestampStream::ODOMETRY);
+  landing.landed = vehicle_landed_;
+  landing.altitude_z = altitude_z_;
+  landing.vertical_speed = vertical_speed_;
+  landing.contact_surface_z = contact_surface_z_;
+  landing_confirmed_ = landing_monitor_.update(steady_now, landing);
+  std_msgs::msg::Bool landing_message;
+  landing_message.data = landing_confirmed_;
+  landing_confirmed_pub_->publish(landing_message);
+
   const auto current_inputs = inputs();
   offboard_cpp::GateDecision result;
   if (recovery_requested_) {
     recovery_requested_ = false;
     if (timestamp_fault_latched_) {
       reset_timestamp_epoch_inputs();
-      result = gate_.tick(steady_now_ns(), inputs());
+      result = gate_.tick(steady_now, inputs());
     } else {
-      result = gate_.request_manual_recovery(steady_now_ns(), current_inputs);
+      result = gate_.request_manual_recovery(steady_now, current_inputs);
     }
   } else if (activation_requested_) {
     activation_requested_ = false;
-    result = gate_.request_manual_activation(steady_now_ns(), current_inputs);
+    result = gate_.request_manual_activation(steady_now, current_inputs);
   } else {
-    result = gate_.tick(steady_now_ns(), current_inputs);
+    result = gate_.tick(steady_now, current_inputs);
   }
   last_ros_time_ns_ = now().nanoseconds();
   if (result.fault_latched) {

@@ -133,6 +133,12 @@ void test_ack_reject_timeout_command_and_sequence_fail_closed()
   prestream_to_mode(late, inputs);
   assert(late.observe_ack(
     4000000001LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority).fault_latched);
+
+  auto status_timeout = gate(true);
+  prestream_to_mode(status_timeout, inputs);
+  status_timeout.observe_ack(
+    1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
+  assert(status_timeout.tick(4050000000LL, inputs).fault_latched);
 }
 
 void test_every_readiness_failure_and_restart_is_zero_output()
@@ -270,6 +276,72 @@ void test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs()
   assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 100) == TimestampResult::FROZEN);
   assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 101) == TimestampResult::ACCEPTED);
 }
+
+void test_land_disarm_and_rearm_ack_lifecycle()
+{
+  auto value = gate(true);
+  auto inputs = ready_inputs();
+  inputs.manual_arm_enable = true;
+  prestream_to_mode(value, inputs);
+  value.observe_ack(
+    1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
+  inputs.vehicle_in_offboard = true;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(1100000000LL, inputs).command == CommandKind::ARM);
+  auto arm_ack = accepted(SafetyGate::kVehicleCmdArmDisarm);
+  arm_ack.status_generation = inputs.vehicle_status_generation;
+  value.observe_ack(1110000000LL, arm_ack, inputs.authority);
+  inputs.vehicle_armed = true;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(1120000000LL, inputs).state == GateState::ACTIVE);
+
+  inputs.mission_request = offboard_cpp::MissionRequest::LAND_PLATFORM;
+  inputs.mission_request_generation = 1;
+  const auto land = value.tick(1130000000LL, inputs);
+  assert(land.state == GateState::REQUEST_LAND && land.command == CommandKind::LAND);
+  auto progress = accepted(SafetyGate::kVehicleCmdNavLand);
+  progress.result = AckResult::IN_PROGRESS;
+  assert(value.observe_ack(1140000000LL, progress, inputs.authority).publish_mode);
+  assert(value.observe_ack(
+    1150000000LL, accepted(SafetyGate::kVehicleCmdNavLand),
+    inputs.authority).state == GateState::LANDING);
+
+  inputs.landing_confirmed = true;
+  inputs.mission_request = offboard_cpp::MissionRequest::DISARM;
+  inputs.mission_request_generation = 2;
+  const auto disarm = value.tick(1160000000LL, inputs);
+  assert(disarm.state == GateState::REQUEST_DISARM && disarm.command == CommandKind::DISARM);
+  auto disarm_ack = accepted(SafetyGate::kVehicleCmdArmDisarm);
+  disarm_ack.status_generation = inputs.vehicle_status_generation;
+  value.observe_ack(1170000000LL, disarm_ack, inputs.authority);
+  inputs.vehicle_armed = false;
+  inputs.vehicle_in_offboard = false;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(1180000000LL, inputs).state == GateState::STANDBY_DISARMED);
+
+  inputs.mission_request = offboard_cpp::MissionRequest::REARM;
+  inputs.mission_request_generation = 3;
+  assert(value.tick(1190000000LL, inputs).state == GateState::PRESTREAM);
+  for (int i = 1; i < 20; ++i) {
+    value.tick(1190000000LL + i * 50000000LL, inputs);
+  }
+  const auto mode_request = value.tick(2190000000LL, inputs);
+  assert(mode_request.command == CommandKind::SET_MODE_OFFBOARD);
+  auto mode_ack = accepted(SafetyGate::kVehicleCmdDoSetMode);
+  mode_ack.status_generation = inputs.vehicle_status_generation;
+  value.observe_ack(2200000000LL, mode_ack, inputs.authority);
+  inputs.vehicle_in_offboard = true;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(2210000000LL, inputs).command == CommandKind::ARM);
+  arm_ack.status_generation = inputs.vehicle_status_generation;
+  value.observe_ack(2220000000LL, arm_ack, inputs.authority);
+  inputs.vehicle_armed = true;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(2230000000LL, inputs).state == GateState::ACTIVE);
+
+  inputs.vehicle_armed = false;
+  assert(value.tick(2240000000LL, inputs).state == GateState::FAULT_LATCHED);
+}
 }  // namespace
 
 int main()
@@ -281,6 +353,7 @@ int main()
   test_activation_and_ack_timestamps_cannot_rollback();
   test_arm_requires_explicit_enable_and_manual_gate();
   test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs();
+  test_land_disarm_and_rearm_ack_lifecycle();
   std::cout << "safety gate tests passed\n";
   return 0;
 }

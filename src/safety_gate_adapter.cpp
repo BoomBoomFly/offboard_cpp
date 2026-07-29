@@ -48,9 +48,11 @@ void SafetyGateAdapter::apply(
     command.command = SafetyGate::kVehicleCmdDoSetMode;
     command.param1 = 1.0F;
     command.param2 = 6.0F;
+  } else if (decision.command == CommandKind::LAND) {
+    command.command = SafetyGate::kVehicleCmdNavLand;
   } else {
     command.command = SafetyGate::kVehicleCmdArmDisarm;
-    command.param1 = 1.0F;
+    command.param1 = decision.command == CommandKind::ARM ? 1.0F : 0.0F;
   }
   command_publisher_->publish(command);
 }
