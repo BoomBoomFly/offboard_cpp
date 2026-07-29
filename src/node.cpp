@@ -13,16 +13,23 @@
 
 namespace
 {
-constexpr std::int64_t kDefaultFreshnessNs = 500000000LL;
 constexpr std::int64_t kPairingWindowNs = 100000000LL;
-constexpr std::int64_t kMaxTimestampAgeUs = 500000LL;
+constexpr std::int64_t kMaxTimestampAgeUs = 3000000LL;
 constexpr std::int64_t kMaxTimestampFutureUs = 100000LL;
 }
 
 OffboardControlNode::OffboardControlNode()
 : Node("offboard_control_node"),
-  freshness_ns_(declare_parameter<std::int64_t>("safety.freshness_ns", kDefaultFreshnessNs)),
-  timestamp_max_age_us_(declare_parameter<std::int64_t>("safety.timestamp_max_age_us", 500000)),
+  odometry_freshness_ns_(declare_parameter<std::int64_t>("freshness.odometry_ns", 200000000LL)),
+  rc_freshness_ns_(declare_parameter<std::int64_t>("freshness.rc_ns", 300000000LL)),
+  timesync_freshness_ns_(declare_parameter<std::int64_t>("freshness.timesync_ns", 2500000000LL)),
+  vehicle_status_freshness_ns_(declare_parameter<std::int64_t>("freshness.vehicle_status_ns", 1200000000LL)),
+  land_detected_freshness_ns_(declare_parameter<std::int64_t>("freshness.land_detected_ns", 1800000000LL)),
+  setpoint_freshness_ns_(declare_parameter<std::int64_t>("freshness.setpoint_ns", 150000000LL)),
+  mode_freshness_ns_(declare_parameter<std::int64_t>("freshness.mode_ns", 150000000LL)),
+  operator_freshness_ns_(declare_parameter<std::int64_t>("freshness.operator_ns", 300000000LL)),
+  authority_freshness_ns_(declare_parameter<std::int64_t>("freshness.authority_ns", 500000000LL)),
+  timestamp_max_age_us_(declare_parameter<std::int64_t>("safety.timestamp_max_age_us", 2000000)),
   timestamp_max_future_us_(declare_parameter<std::int64_t>("safety.timestamp_max_future_us", 100000)),
   home_surface_z_(declare_parameter<double>("mission.home_surface_z", 0.0)),
   platform_surface_z_(declare_parameter<double>("mission.platform_surface_z", 0.0)),
@@ -41,7 +48,8 @@ OffboardControlNode::OffboardControlNode()
   landing_monitor_(
     declare_parameter<std::int64_t>("landing.stable_ns", 1000000000LL),
     declare_parameter<double>("landing.max_vertical_speed", 0.15),
-    declare_parameter<double>("landing.height_tolerance", 0.25))
+    declare_parameter<double>("landing.height_tolerance", 0.25),
+    static_cast<std::uint32_t>(declare_parameter<int>("landing.minimum_samples", 2)))
 {
   const auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
   adapter_ = std::make_unique<offboard_cpp::SafetyGateAdapter>(*this, qos);
@@ -129,6 +137,7 @@ OffboardControlNode::OffboardControlNode()
         return;
       }
       vehicle_landed_ = message->landed;
+      land_detected_timestamp_us_ = message->timestamp;
       land_received_ns_ = steady_now_ns();
     });
   authority_sub_ = create_subscription<std_msgs::msg::String>(
@@ -190,6 +199,8 @@ OffboardControlNode::OffboardControlNode()
     });
   landing_confirmed_pub_ = create_publisher<std_msgs::msg::Bool>(
     "offboard/landing_confirmed", qos);
+  flight_state_pub_ = create_publisher<std_msgs::msg::String>("offboard/flight_state", qos);
+  fault_reason_pub_ = create_publisher<std_msgs::msg::String>("offboard/fault_reason", qos);
   timer_ = create_wall_timer(std::chrono::milliseconds(20), std::bind(&OffboardControlNode::on_timer, this));
 }
 
@@ -199,10 +210,12 @@ std::int64_t OffboardControlNode::steady_now_ns() const
     std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
-bool OffboardControlNode::fresh(std::int64_t received_ns) const
+bool OffboardControlNode::fresh(
+  std::int64_t received_ns, std::int64_t max_age_ns) const
 {
   const auto now = steady_now_ns();
-  return received_ns >= 0 && now >= received_ns && now - received_ns < freshness_ns_;
+  return max_age_ns > 0 && received_ns >= 0 && now >= received_ns &&
+         now - received_ns < max_age_ns;
 }
 
 bool OffboardControlNode::finite_setpoint(const px4_msgs::msg::TrajectorySetpoint & message) const
@@ -213,7 +226,7 @@ bool OffboardControlNode::finite_setpoint(const px4_msgs::msg::TrajectorySetpoin
 
 bool OffboardControlNode::accept_timesync_timestamp(std::uint64_t timestamp_us)
 {
-  const auto result = timestamp_gate_.observe_timesync(timestamp_us);
+  const auto result = timestamp_gate_.observe_timesync(timestamp_us, steady_now_ns());
   if (result != offboard_cpp::TimestampResult::ACCEPTED && gate_.state() != offboard_cpp::GateState::WAIT) {
     timestamp_fault_latched_ = true;
   }
@@ -223,7 +236,7 @@ bool OffboardControlNode::accept_timesync_timestamp(std::uint64_t timestamp_us)
 bool OffboardControlNode::accept_timestamp(
   offboard_cpp::TimestampStream stream, std::uint64_t timestamp_us)
 {
-  const auto result = timestamp_gate_.observe(stream, timestamp_us);
+  const auto result = timestamp_gate_.observe(stream, timestamp_us, steady_now_ns());
   if (result != offboard_cpp::TimestampResult::ACCEPTED && gate_.state() != offboard_cpp::GateState::WAIT) {
     timestamp_fault_latched_ = true;
   }
@@ -242,6 +255,7 @@ void OffboardControlNode::reset_timestamp_epoch_inputs()
   vehicle_armed_ = false;
   vehicle_status_generation_ = 0;
   vehicle_landed_ = false;
+  land_detected_timestamp_us_ = 0;
   landing_confirmed_ = false;
   landing_monitor_.reset();
 }
@@ -286,18 +300,30 @@ offboard_cpp::GateInputs OffboardControlNode::inputs() const
   const auto ros_now = now().nanoseconds();
   result.clock_monotonic = timestamp_config_valid_ && !timestamp_fault_latched_ &&
     (last_ros_time_ns_ < 0 || ros_now >= last_ros_time_ns_);
-  result.vehicle_status_fresh = fresh(status_received_ns_) &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::VEHICLE_STATUS);
-  result.odometry_fresh = fresh(odom_received_ns_) && odom_valid_ &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::ODOMETRY);
-  result.timesync_fresh = fresh(timesync_received_ns_) && timestamp_gate_.timesync_ready();
-  result.rc_fresh = fresh(rc_received_ns_) && rc_valid_ &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::RC);
-  result.kill_fresh = fresh(kill_received_ns_);
-  result.setpoint_fresh = fresh(setpoint_received_ns_) &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::SETPOINT);
-  result.mode_fresh = fresh(mode_received_ns_) &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::MODE);
+  const auto steady_now = steady_now_ns();
+  result.vehicle_status_fresh = fresh(status_received_ns_, vehicle_status_freshness_ns_) &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::VEHICLE_STATUS, steady_now,
+      static_cast<std::uint64_t>(vehicle_status_freshness_ns_ / 1000));
+  result.odometry_fresh = fresh(odom_received_ns_, odometry_freshness_ns_) && odom_valid_ &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::ODOMETRY, steady_now,
+      static_cast<std::uint64_t>(odometry_freshness_ns_ / 1000));
+  result.timesync_fresh = fresh(timesync_received_ns_, timesync_freshness_ns_) &&
+    timestamp_gate_.timesync_ready();
+  result.rc_fresh = fresh(rc_received_ns_, rc_freshness_ns_) && rc_valid_ &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::RC, steady_now,
+      static_cast<std::uint64_t>(rc_freshness_ns_ / 1000));
+  result.kill_fresh = fresh(kill_received_ns_, operator_freshness_ns_);
+  result.setpoint_fresh = fresh(setpoint_received_ns_, setpoint_freshness_ns_) &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::SETPOINT, steady_now,
+      static_cast<std::uint64_t>(setpoint_freshness_ns_ / 1000));
+  result.mode_fresh = fresh(mode_received_ns_, mode_freshness_ns_) &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::MODE, steady_now,
+      static_cast<std::uint64_t>(mode_freshness_ns_ / 1000));
   result.setpoint_mode_paired = result.setpoint_fresh && result.mode_fresh &&
     setpoint_sequence_ != 0 && setpoint_sequence_ == mode_sequence_ &&
     std::llabs(setpoint_received_ns_ - mode_received_ns_) <= kPairingWindowNs;
@@ -306,10 +332,10 @@ offboard_cpp::GateInputs OffboardControlNode::inputs() const
   result.vehicle_armed = vehicle_armed_;
   result.landing_confirmed = landing_confirmed_;
   result.vehicle_status_generation = vehicle_status_generation_;
-  result.manual_arm_enable = manual_arm_enable_ && fresh(manual_arm_received_ns_);
+  result.manual_arm_enable = manual_arm_enable_ && fresh(manual_arm_received_ns_, operator_freshness_ns_);
   result.mission_request = mission_request_;
   result.mission_request_generation = mission_request_generation_;
-  result.authority.fresh = fresh(authority_.received_ns);
+  result.authority.fresh = fresh(authority_.received_ns, authority_freshness_ns_);
   // The signed/approved authority heartbeat is necessary but not sufficient:
   // continuously reject a second ROS writer on any PX4 control input as well.
   result.authority.single_writer = authority_.single_writer && graph_has_only_gate_writer();
@@ -354,13 +380,20 @@ void OffboardControlNode::on_timer()
 {
   const auto steady_now = steady_now_ns();
   offboard_cpp::LandingObservation landing;
-  landing.land_detected_fresh = fresh(land_received_ns_) &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::LAND_DETECTED);
-  landing.vehicle_status_fresh = fresh(status_received_ns_) &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::VEHICLE_STATUS);
-  landing.odometry_fresh = fresh(odom_received_ns_) && odom_valid_ &&
-    timestamp_gate_.current(offboard_cpp::TimestampStream::ODOMETRY);
+  landing.land_detected_fresh = fresh(land_received_ns_, land_detected_freshness_ns_) &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::LAND_DETECTED, steady_now,
+      static_cast<std::uint64_t>(land_detected_freshness_ns_ / 1000));
+  landing.vehicle_status_fresh = fresh(status_received_ns_, vehicle_status_freshness_ns_) &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::VEHICLE_STATUS, steady_now,
+      static_cast<std::uint64_t>(vehicle_status_freshness_ns_ / 1000));
+  landing.odometry_fresh = fresh(odom_received_ns_, odometry_freshness_ns_) && odom_valid_ &&
+    timestamp_gate_.current(
+      offboard_cpp::TimestampStream::ODOMETRY, steady_now,
+      static_cast<std::uint64_t>(odometry_freshness_ns_ / 1000));
   landing.landed = vehicle_landed_;
+  landing.land_detected_timestamp_us = land_detected_timestamp_us_;
   landing.altitude_z = altitude_z_;
   landing.vertical_speed = vertical_speed_;
   landing.contact_surface_z = contact_surface_z_;
@@ -389,7 +422,15 @@ void OffboardControlNode::on_timer()
   if (result.fault_latched) {
     RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 1000, "Offboard gate latched: %s", result.reason);
   }
-  adapter_->apply(result, setpoint_, mode_, now().nanoseconds() / 1000);
+  std_msgs::msg::String state_message;
+  state_message.data = offboard_cpp::gate_state_name(result.state);
+  flight_state_pub_->publish(state_message);
+  std_msgs::msg::String fault_message;
+  fault_message.data = result.fault_latched ? result.reason : "";
+  fault_reason_pub_->publish(fault_message);
+  adapter_->apply(
+    result, setpoint_, mode_,
+    static_cast<std::int64_t>(timestamp_gate_.estimated_px4_now(steady_now)));
 }
 
 int main(int argc, char ** argv)

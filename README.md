@@ -1,5 +1,21 @@
 # PX4 Offboard
 
+## 普通垂直飞行生产契约（当前权威）
+
+本阶段仅实现 T265 定位下的垂直起飞、悬停 3 秒和 PX4 Land。`MissionTask::VERTICAL_TEST` 固定编号为 3；状态序列为 `WAIT_START -> TAKEOFF -> HOVER_3S -> HOME_DESCEND -> LAND_CONFIRMED -> DISARMED -> COMPLETE`，不会进入小车跟随或投放状态。
+
+- `config/vertical_test.yaml`：0.5 m、上升不超过 0.3 m/s、下降不超过 0.2 m/s。
+- `config/contest_task1.yaml`：仅保存 1.5 m 比赛参数，本阶段不得用于实机。
+- `/mission/start` 必须是 `std_msgs/msg/UInt32`；0 无效、1/2 为赛题任务、3 为 VERTICAL_TEST。
+- START 前必须先发布 volatile `/mission/start/context`（`std_msgs/msg/UInt64`）：bit 15:0 mission_id、23:16 session_id、31:24 seq、63:32 source_epoch。上下文超过 500 ms、任务不匹配、旧 session/seq/epoch、重复或运行中事件全部拒绝。
+- `/fmu/in/trajectory_setpoint`、`offboard_control_mode`、`vehicle_command` 只能由 `offboard_control_node` 发布。
+- `/offboard/flight_state` 和 `/offboard/fault_reason` 发布安全门状态和故障原因。
+
+生产 RC 只允许来自 `/fmu/out/rc_channels`。`rc_operator.*` 通道与阈值默认是故意无效的 fail-closed 占位；必须用实测映射替换，否则 adapter 拒绝启动。RC 断流、`signal_lost` 或非法通道值都会发布 `/operator/kill=true`。生产 launch 没有 mock RC；mock 仅允许在隔离 ROS domain 中由外部测试工具提供。`takeoff_land.enable_arm=false` 仍是默认值。
+
+> 以下历史说明仅作上游背景；与本节冲突时以本节、当前 launch 和配置为准。
+
+
 PX4 无人机 Offboard 模式底层控制(C++)
 
 基于 ubuntu20.04 系统下的 ros2(foxy)

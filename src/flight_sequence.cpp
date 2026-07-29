@@ -75,10 +75,12 @@ FlightOutput FlightSequence::tick(const FlightInputs & inputs)
   MissionRequest request = MissionRequest::NONE;
   switch (state_) {
     case MissionState::WAIT_START:
+      start_authorized_ = start_authorized_ || inputs.start;
       if (inputs.odometry_fresh) {
         command_ = inputs.position;
       }
-      if (inputs.start && inputs.odometry_fresh && inputs.vehicle_status_fresh) {
+      if (start_authorized_ && inputs.armed && inputs.odometry_fresh &&
+        inputs.vehicle_status_fresh) {
         home_ = inputs.position;
         command_ = inputs.position;
         have_home_ = true;
@@ -91,8 +93,8 @@ FlightOutput FlightSequence::tick(const FlightInputs & inputs)
         move_toward(target, config_.takeoff_speed, dt);
         if (close_to(inputs.position, target)) {
           enter(
-            config_.task == MissionTask::TASK1 ? MissionState::HOVER_3S :
-            MissionState::ACQUIRE_CAR, inputs.now_ns);
+            config_.task == MissionTask::TASK2 ? MissionState::ACQUIRE_CAR :
+            MissionState::HOVER_3S, inputs.now_ns);
         }
         break;
       }
@@ -100,7 +102,9 @@ FlightOutput FlightSequence::tick(const FlightInputs & inputs)
       if (inputs.now_ns - entered_ns_ >=
         static_cast<std::int64_t>(config_.hover_seconds * 1.0e9))
       {
-        enter(MissionState::ACQUIRE_CAR, inputs.now_ns);
+        enter(
+          config_.task == MissionTask::VERTICAL_TEST ? MissionState::HOME_DESCEND :
+          MissionState::ACQUIRE_CAR, inputs.now_ns);
       }
       break;
     case MissionState::ACQUIRE_CAR:

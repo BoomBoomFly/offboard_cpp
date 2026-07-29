@@ -95,6 +95,8 @@ struct GateDecision {
   const char * reason{"waiting"};
 };
 
+const char * gate_state_name(GateState state);
+
 class SafetyGate
 {
 public:

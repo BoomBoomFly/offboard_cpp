@@ -30,6 +30,8 @@ add_library(px4_offboard_lib
   src/graph_guard.cpp
   src/landing_monitor.cpp
   src/flight_sequence.cpp
+  src/rc_operator_adapter.cpp
+  src/mission_start_gate.cpp
 )
 
 target_include_directories(px4_offboard_lib PUBLIC
@@ -70,6 +72,16 @@ if(BUILD_TESTING)
   add_executable(test_flight_sequence test/test_flight_sequence.cpp)
   target_link_libraries(test_flight_sequence px4_offboard_lib)
   add_test(NAME test_flight_sequence COMMAND test_flight_sequence)
+
+  add_executable(test_contract_guards test/test_contract_guards.cpp)
+  target_link_libraries(test_contract_guards px4_offboard_lib)
+  add_test(NAME test_contract_guards COMMAND test_contract_guards)
+
+  add_test(
+    NAME test_start_source_contract
+    COMMAND ${CMAKE_COMMAND}
+      -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/src/flight_sequence_node.cpp
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/check_start_contract.cmake)
 endif()
 
 # ---------------------------------------------
@@ -94,6 +106,12 @@ add_executable(flight_sequence_node
 target_link_libraries(flight_sequence_node px4_offboard_lib)
 ament_target_dependencies(flight_sequence_node rclcpp std_msgs px4_msgs)
 
+add_executable(rc_operator_adapter_node
+  src/rc_operator_adapter_node.cpp
+)
+target_link_libraries(rc_operator_adapter_node px4_offboard_lib)
+ament_target_dependencies(rc_operator_adapter_node rclcpp std_msgs px4_msgs)
+
 add_executable(offboard_authority_node
   src/authority_publisher_node.cpp
 )
@@ -104,6 +122,7 @@ ament_target_dependencies(offboard_authority_node rclcpp std_msgs px4_msgs)
 install(TARGETS
   offboard_node
   flight_sequence_node
+  rc_operator_adapter_node
   offboard_authority_node
   DESTINATION lib/${PROJECT_NAME}
 )
