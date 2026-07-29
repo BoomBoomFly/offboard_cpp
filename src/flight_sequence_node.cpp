@@ -17,7 +17,10 @@
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/u_int8.hpp>
+
+#include <topics.hpp>
 
 namespace
 {
@@ -40,6 +43,8 @@ public:
     command_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>("/offboard/cmd", qos);
     mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>("/offboard/cmd_mode", qos);
     request_pub_ = create_publisher<std_msgs::msg::UInt8>("/offboard/command_request", qos);
+    mission_state_pub_ =
+      create_publisher<std_msgs::msg::String>(offboard_topics::kUavMissionState, 10);
 
     odom_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
       "/fmu/out/vehicle_odometry", qos,
@@ -79,7 +84,7 @@ public:
           car_received_ns_ = steady_now_ns();
         }
       });
-    start_sub_ = bool_subscription("/mission/start", &start_);
+    start_sub_ = bool_subscription(offboard_topics::kMissionStart, &start_);
     follow_sub_ = bool_subscription("/mission/follow_complete", &follow_complete_);
     drop_sub_ = bool_subscription("/mission/drop_complete", &drop_complete_);
     landing_sub_ = bool_subscription("/offboard/landing_confirmed", &landing_confirmed_);
@@ -153,6 +158,13 @@ private:
     inputs.follow_complete = follow_complete_;
     inputs.drop_complete = drop_complete_;
     const auto output = sequence_.tick(inputs);
+    if (!state_published_ || output.state != last_published_state_) {
+      std_msgs::msg::String state;
+      state.data = offboard_cpp::mission_state_name(output.state);
+      mission_state_pub_->publish(state);
+      last_published_state_ = output.state;
+      state_published_ = true;
+    }
     const auto timestamp = px4_now_us(now_ns);
     if (!output.setpoint_valid || timestamp == 0) {
       return;
@@ -201,10 +213,13 @@ private:
   bool follow_complete_{false};
   bool drop_complete_{false};
   bool landing_confirmed_{false};
+  bool state_published_{false};
+  offboard_cpp::MissionState last_published_state_{offboard_cpp::MissionState::WAIT_START};
 
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr command_pub_;
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr mode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr request_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<px4_msgs::msg::TimesyncStatus>::SharedPtr timesync_sub_;
