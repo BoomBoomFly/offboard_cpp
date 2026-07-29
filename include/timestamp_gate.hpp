@@ -39,10 +39,14 @@ class TimestampGate
 public:
   explicit TimestampGate(std::uint64_t max_age_us = 500000, std::uint64_t max_future_us = 100000);
 
-  TimestampResult observe_timesync(std::uint64_t timestamp_us);
-  TimestampResult observe(TimestampStream stream, std::uint64_t timestamp_us);
-  bool current(TimestampStream stream) const;
+  TimestampResult observe_timesync(std::uint64_t timestamp_us, std::int64_t monotonic_ns);
+  TimestampResult observe(
+    TimestampStream stream, std::uint64_t timestamp_us, std::int64_t monotonic_ns);
+  bool current(
+    TimestampStream stream, std::int64_t monotonic_ns,
+    std::uint64_t max_age_us = 0) const;
   bool timesync_ready() const { return timesync_timestamp_us_ != 0; }
+  std::uint64_t estimated_px4_now(std::int64_t monotonic_ns) const;
   void restart_epoch();
 
 private:
@@ -52,6 +56,7 @@ private:
   std::uint64_t max_age_us_;
   std::uint64_t max_future_us_;
   std::uint64_t timesync_timestamp_us_{0};
+  std::int64_t timesync_received_ns_{-1};
   std::array<std::uint64_t, kStreamCount> last_timestamp_us_{};
 };
 

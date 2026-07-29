@@ -39,7 +39,7 @@ private:
   };
 
   std::int64_t steady_now_ns() const;
-  bool fresh(std::int64_t received_ns) const;
+  bool fresh(std::int64_t received_ns, std::int64_t max_age_ns) const;
   bool finite_setpoint(const px4_msgs::msg::TrajectorySetpoint & message) const;
   bool accept_timesync_timestamp(std::uint64_t timestamp_us);
   bool accept_timestamp(offboard_cpp::TimestampStream stream, std::uint64_t timestamp_us);
@@ -50,7 +50,15 @@ private:
   void on_timer();
   void on_ack(const px4_msgs::msg::VehicleCommandAck::SharedPtr message);
 
-  const std::int64_t freshness_ns_;
+  const std::int64_t odometry_freshness_ns_;
+  const std::int64_t rc_freshness_ns_;
+  const std::int64_t timesync_freshness_ns_;
+  const std::int64_t vehicle_status_freshness_ns_;
+  const std::int64_t land_detected_freshness_ns_;
+  const std::int64_t setpoint_freshness_ns_;
+  const std::int64_t mode_freshness_ns_;
+  const std::int64_t operator_freshness_ns_;
+  const std::int64_t authority_freshness_ns_;
   const std::int64_t timestamp_max_age_us_;
   const std::int64_t timestamp_max_future_us_;
   const double home_surface_z_;
@@ -87,6 +95,7 @@ private:
   double vertical_speed_{0.0};
   double contact_surface_z_{0.0};
   std::uint64_t vehicle_status_generation_{0};
+  std::uint64_t land_detected_timestamp_us_{0};
   offboard_cpp::MissionRequest mission_request_{offboard_cpp::MissionRequest::NONE};
   std::uint64_t mission_request_generation_{0};
   bool rc_valid_{false};
@@ -114,6 +123,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr recovery_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr command_request_sub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr landing_confirmed_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr flight_state_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_reason_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

@@ -9,7 +9,7 @@
 namespace offboard_cpp
 {
 
-enum class MissionTask : std::uint8_t { TASK1 = 1, TASK2 = 2 };
+enum class MissionTask : std::uint8_t { TASK1 = 1, TASK2 = 2, VERTICAL_TEST = 3 };
 
 enum class MissionState
 {
@@ -96,6 +96,7 @@ private:
   std::array<double, 3> command_{};
   std::array<double, 3> last_car_target_{};
   bool have_home_{false};
+  bool start_authorized_{false};
   bool have_car_target_{false};
   MissionRequest last_request_{MissionRequest::NONE};
 };

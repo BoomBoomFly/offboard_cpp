@@ -69,6 +69,54 @@ void test_task1_normal_landing()
   assert(sequence.tick(inputs).state == MissionState::COMPLETE);
 }
 
+void test_start_is_latched_until_fresh_armed_status()
+{
+  FlightConfig config;
+  config.task = MissionTask::VERTICAL_TEST;
+  FlightSequence sequence(config);
+  auto inputs = base();
+  inputs.armed = false;
+  inputs.start = true;
+  assert(sequence.tick(inputs).state == MissionState::WAIT_START);
+  inputs.start = false;
+  assert(sequence.tick(inputs).state == MissionState::WAIT_START);
+  inputs.armed = true;
+  assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
+}
+
+void test_vertical_test_never_enters_contest_states()
+{
+  FlightConfig config;
+  config.task = MissionTask::VERTICAL_TEST;
+  config.takeoff_height = 0.5;
+  config.takeoff_speed = 0.3;
+  config.home_land_speed = 0.2;
+  config.hover_seconds = 0.04;
+  FlightSequence sequence(config);
+  auto inputs = base();
+  inputs.start = true;
+  assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
+  inputs.now_ns += 20000000LL;
+  assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
+  inputs.start = false;
+  follow_command(sequence, inputs, MissionState::HOVER_3S, 200);
+  follow_command(sequence, inputs, MissionState::HOME_DESCEND, 20);
+  bool land_requested = false;
+  for (int i = 0; i < 200; ++i) {
+    inputs.now_ns += 20000000LL;
+    const auto output = sequence.tick(inputs);
+    inputs.position = output.position;
+    land_requested = land_requested || output.request == MissionRequest::LAND_HOME;
+  }
+  assert(land_requested);
+  inputs.landing_confirmed = true;
+  assert(sequence.tick(inputs).state == MissionState::LAND_CONFIRMED);
+  assert(sequence.tick(inputs).request == MissionRequest::DISARM);
+  inputs.armed = false;
+  assert(sequence.tick(inputs).state == MissionState::DISARMED);
+  assert(sequence.tick(inputs).state == MissionState::COMPLETE);
+}
+
 void test_task2_platform_land_rearm_and_home_land()
 {
   FlightConfig config;
@@ -128,6 +176,8 @@ void test_task2_platform_land_rearm_and_home_land()
 int main()
 {
   test_task1_normal_landing();
+  test_start_is_latched_until_fresh_armed_status();
+  test_vertical_test_never_enters_contest_states();
   test_task2_platform_land_rearm_and_home_land();
   return 0;
 }

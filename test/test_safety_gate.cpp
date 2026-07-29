@@ -67,6 +67,22 @@ CommandAck accepted(std::uint32_t command)
   return ack;
 }
 
+void activate_gate(SafetyGate & value, GateInputs & inputs)
+{
+  inputs.manual_arm_enable = true;
+  prestream_to_mode(value, inputs);
+  value.observe_ack(1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
+  inputs.vehicle_in_offboard = true;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(1100000000LL, inputs).command == CommandKind::ARM);
+  auto arm_ack = accepted(SafetyGate::kVehicleCmdArmDisarm);
+  arm_ack.status_generation = inputs.vehicle_status_generation;
+  value.observe_ack(1110000000LL, arm_ack, inputs.authority);
+  inputs.vehicle_armed = true;
+  ++inputs.vehicle_status_generation;
+  assert(value.tick(1120000000LL, inputs).state == GateState::ACTIVE);
+}
+
 void test_happy_path_disarmed()
 {
   auto value = gate(true);
@@ -139,6 +155,77 @@ void test_ack_reject_timeout_command_and_sequence_fail_closed()
   status_timeout.observe_ack(
     1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
   assert(status_timeout.tick(4050000000LL, inputs).fault_latched);
+}
+
+void test_each_ack_rejection_and_timeout()
+{
+  auto inputs = ready_inputs();
+  inputs.manual_arm_enable = true;
+  auto arm_rejected = gate(true);
+  prestream_to_mode(arm_rejected, inputs);
+  arm_rejected.observe_ack(1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
+  inputs.vehicle_in_offboard = true;
+  ++inputs.vehicle_status_generation;
+  assert(arm_rejected.tick(1100000000LL, inputs).command == CommandKind::ARM);
+  auto rejected_ack = accepted(SafetyGate::kVehicleCmdArmDisarm);
+  rejected_ack.result = AckResult::REJECTED;
+  assert(arm_rejected.observe_ack(1110000000LL, rejected_ack, inputs.authority).fault_latched);
+
+  inputs = ready_inputs();
+  auto arm_timeout = gate(true);
+  inputs.manual_arm_enable = true;
+  prestream_to_mode(arm_timeout, inputs);
+  arm_timeout.observe_ack(1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
+  inputs.vehicle_in_offboard = true;
+  ++inputs.vehicle_status_generation;
+  arm_timeout.tick(1100000000LL, inputs);
+  assert(arm_timeout.tick(4100000001LL, inputs).fault_latched);
+
+  inputs = ready_inputs();
+  auto land_rejected = gate(true);
+  activate_gate(land_rejected, inputs);
+  inputs.mission_request = offboard_cpp::MissionRequest::LAND_HOME;
+  inputs.mission_request_generation = 1;
+  assert(land_rejected.tick(1130000000LL, inputs).command == CommandKind::LAND);
+  rejected_ack = accepted(SafetyGate::kVehicleCmdNavLand);
+  rejected_ack.result = AckResult::REJECTED;
+  assert(land_rejected.observe_ack(1140000000LL, rejected_ack, inputs.authority).fault_latched);
+
+  inputs = ready_inputs();
+  auto land_timeout = gate(true);
+  activate_gate(land_timeout, inputs);
+  inputs.mission_request = offboard_cpp::MissionRequest::LAND_HOME;
+  inputs.mission_request_generation = 1;
+  land_timeout.tick(1130000000LL, inputs);
+  assert(land_timeout.tick(4130000001LL, inputs).fault_latched);
+
+  inputs = ready_inputs();
+  auto disarm_rejected = gate(true);
+  activate_gate(disarm_rejected, inputs);
+  inputs.mission_request = offboard_cpp::MissionRequest::LAND_HOME;
+  inputs.mission_request_generation = 1;
+  disarm_rejected.tick(1130000000LL, inputs);
+  disarm_rejected.observe_ack(1140000000LL, accepted(SafetyGate::kVehicleCmdNavLand), inputs.authority);
+  inputs.landing_confirmed = true;
+  inputs.mission_request = offboard_cpp::MissionRequest::DISARM;
+  inputs.mission_request_generation = 2;
+  assert(disarm_rejected.tick(1150000000LL, inputs).command == CommandKind::DISARM);
+  rejected_ack = accepted(SafetyGate::kVehicleCmdArmDisarm);
+  rejected_ack.result = AckResult::REJECTED;
+  assert(disarm_rejected.observe_ack(1160000000LL, rejected_ack, inputs.authority).fault_latched);
+
+  inputs = ready_inputs();
+  auto disarm_timeout = gate(true);
+  activate_gate(disarm_timeout, inputs);
+  inputs.mission_request = offboard_cpp::MissionRequest::LAND_HOME;
+  inputs.mission_request_generation = 1;
+  disarm_timeout.tick(1130000000LL, inputs);
+  disarm_timeout.observe_ack(1140000000LL, accepted(SafetyGate::kVehicleCmdNavLand), inputs.authority);
+  inputs.landing_confirmed = true;
+  inputs.mission_request = offboard_cpp::MissionRequest::DISARM;
+  inputs.mission_request_generation = 2;
+  disarm_timeout.tick(1150000000LL, inputs);
+  assert(disarm_timeout.tick(4150000001LL, inputs).fault_latched);
 }
 
 void test_every_readiness_failure_and_restart_is_zero_output()
@@ -248,33 +335,81 @@ void test_arm_requires_explicit_enable_and_manual_gate()
 
 void test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs()
 {
-  // TimesyncStatus.timestamp is the PX4 v1.16 boot-usec baseline for every
-  // stream exercised below; a restart creates a new, non-inheriting epoch.
   TimestampGate timestamps(500, 100);
-  assert(timestamps.observe_timesync(0) == TimestampResult::ZERO);
-  assert(timestamps.observe_timesync(1000) == TimestampResult::ACCEPTED);
-  assert(timestamps.observe_timesync(1000) == TimestampResult::FROZEN);
-  assert(timestamps.observe_timesync(999) == TimestampResult::BACKWARD);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 0) == TimestampResult::ZERO);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::ACCEPTED);
-  assert(timestamps.current(TimestampStream::VEHICLE_STATUS));
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::FROZEN);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 999) == TimestampResult::BACKWARD);
-  assert(timestamps.observe(TimestampStream::MODE, 1101) == TimestampResult::FUTURE);
-  assert(timestamps.observe_timesync(2000) == TimestampResult::ACCEPTED);
-  assert(!timestamps.current(TimestampStream::VEHICLE_STATUS));
-  assert(timestamps.observe(TimestampStream::ODOMETRY, 1499) == TimestampResult::STALE);
+  assert(timestamps.observe_timesync(0, 0) == TimestampResult::ZERO);
+  assert(timestamps.observe_timesync(1000, 0) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe_timesync(1000, 1) == TimestampResult::FROZEN);
+  assert(timestamps.observe_timesync(999, 2) == TimestampResult::BACKWARD);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000, 0) ==
+    TimestampResult::ACCEPTED);
+  assert(timestamps.current(TimestampStream::VEHICLE_STATUS, 0));
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000, 1) ==
+    TimestampResult::FROZEN);
+  assert(timestamps.observe(TimestampStream::MODE, 1201, 100000) == TimestampResult::FUTURE);
+  assert(timestamps.observe(TimestampStream::ODOMETRY, 1001, 1000000) == TimestampResult::STALE);
+  assert(!timestamps.current(TimestampStream::VEHICLE_STATUS, 1000000));
+  assert(timestamps.observe_timesync(2000, -1) == TimestampResult::ZERO);
 
   timestamps.restart_epoch();
   assert(!timestamps.timesync_ready());
-  assert(!timestamps.current(TimestampStream::VEHICLE_STATUS));
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::NO_TIMESYNC);
-  assert(timestamps.observe_timesync(100) == TimestampResult::ACCEPTED);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000) == TimestampResult::FUTURE);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 100) == TimestampResult::ACCEPTED);
-  assert(timestamps.observe_timesync(101) == TimestampResult::ACCEPTED);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 100) == TimestampResult::FROZEN);
-  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 101) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000, 0) ==
+    TimestampResult::NO_TIMESYNC);
+  assert(timestamps.observe_timesync(100, 10) == TimestampResult::ACCEPTED);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 1000, 10) ==
+    TimestampResult::FUTURE);
+  assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, 100, 10) ==
+    TimestampResult::ACCEPTED);
+  assert(timestamps.observe_timesync(101, 9) == TimestampResult::BACKWARD);
+}
+
+void test_sixty_second_real_frequency_replay()
+{
+  TimestampGate timestamps(3000000, 100000);
+  auto inputs = ready_inputs();
+  SafetyGate safety("operator-a", "lease-1", "epoch-1", false);
+  assert(!safety.request_manual_activation(0, inputs).fault_latched);
+  const std::uint64_t base_us = 1000000;
+  int next_timesync = 0;
+  int next_status = 0;
+  int next_land = 0;
+  bool jitter = false;
+  for (int tick = 0; tick <= 3000; ++tick) {
+    const std::int64_t now_ns = static_cast<std::int64_t>(tick) * 20000000LL;
+    const std::uint64_t now_us = base_us + static_cast<std::uint64_t>(now_ns / 1000);
+    if (tick >= next_timesync) {
+      assert(timestamps.observe_timesync(now_us, now_ns) == TimestampResult::ACCEPTED);
+      next_timesync += jitter ? 49 : 51;
+      jitter = !jitter;
+    }
+    if (tick >= next_status) {
+      assert(timestamps.observe(TimestampStream::VEHICLE_STATUS, now_us, now_ns) ==
+        TimestampResult::ACCEPTED);
+      next_status += (tick / 25) % 2 == 0 ? 24 : 26;
+    }
+    if (tick >= next_land) {
+      assert(timestamps.observe(TimestampStream::LAND_DETECTED, now_us, now_ns) ==
+        TimestampResult::ACCEPTED);
+      next_land += (tick / 50) % 2 == 0 ? 48 : 52;
+    }
+    if (tick % 5 == 0) {
+      assert(timestamps.observe(TimestampStream::RC, now_us, now_ns) ==
+        TimestampResult::ACCEPTED);
+    }
+    assert(timestamps.observe(TimestampStream::ODOMETRY, now_us, now_ns) ==
+      TimestampResult::ACCEPTED);
+    assert(timestamps.observe(TimestampStream::SETPOINT, now_us, now_ns) ==
+      TimestampResult::ACCEPTED);
+    assert(timestamps.observe(TimestampStream::MODE, now_us, now_ns) ==
+      TimestampResult::ACCEPTED);
+    assert(timestamps.current(TimestampStream::VEHICLE_STATUS, now_ns, 1200000));
+    assert(timestamps.current(TimestampStream::LAND_DETECTED, now_ns, 1800000));
+    assert(timestamps.current(TimestampStream::RC, now_ns, 300000));
+    assert(timestamps.current(TimestampStream::ODOMETRY, now_ns, 200000));
+    assert(timestamps.current(TimestampStream::SETPOINT, now_ns, 150000));
+    assert(timestamps.current(TimestampStream::MODE, now_ns, 150000));
+    assert(!safety.tick(now_ns, inputs).fault_latched);
+  }
+  assert(!timestamps.current(TimestampStream::ODOMETRY, 60201000000LL, 200000));
 }
 
 void test_land_disarm_and_rearm_ack_lifecycle()
@@ -348,11 +483,13 @@ int main()
 {
   test_happy_path_disarmed();
   test_ack_reject_timeout_command_and_sequence_fail_closed();
+  test_each_ack_rejection_and_timeout();
   test_every_readiness_failure_and_restart_is_zero_output();
   test_manual_recovery_never_auto_active();
   test_activation_and_ack_timestamps_cannot_rollback();
   test_arm_requires_explicit_enable_and_manual_gate();
   test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs();
+  test_sixty_second_real_frequency_replay();
   test_land_disarm_and_rearm_ack_lifecycle();
   std::cout << "safety gate tests passed\n";
   return 0;

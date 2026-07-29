@@ -15,14 +15,14 @@
 
     # 完整任务轨迹参数（由 flight_sequence_node 直接读取）
     mission:
-      task_id: 1
+      task_id: 3
       # Must equal mission_bridge uint32 source_epoch; zero intentionally fails closed.
       expected_source_epoch: 0
-      takeoff_speed: 0.5
+      takeoff_speed: 0.3
       cruise_speed: 1.0
-      home_land_speed: 0.3
+      home_land_speed: 0.2
       platform_land_speed: 0.2
-      takeoff_height: 1.0
+      takeoff_height: 0.5
       hover_seconds: 3.0
       platform_hold_seconds: 5.0
       position_tolerance: 0.2

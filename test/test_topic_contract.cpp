@@ -15,6 +15,7 @@ TEST(TopicContractTest, VehicleStatusMatchesPx4V1162BridgeContract)
 TEST(TopicContractTest, IntegrationTopicsHaveDedicatedMeanings)
 {
     EXPECT_STREQ(offboard_topics::kMissionStart, "/mission/start");
+    EXPECT_STREQ(offboard_topics::kMissionStartContext, "/mission/start/context");
     EXPECT_STREQ(offboard_topics::kUavMissionState, "/uav/mission_state");
 }
 

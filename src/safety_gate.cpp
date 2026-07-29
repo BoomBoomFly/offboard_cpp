@@ -2,6 +2,24 @@
 
 namespace offboard_cpp
 {
+
+const char * gate_state_name(GateState state)
+{
+  switch (state) {
+    case GateState::WAIT: return "WAIT";
+    case GateState::PRESTREAM: return "PRESTREAM";
+    case GateState::REQUEST_MODE: return "REQUEST_MODE";
+    case GateState::REQUEST_ARM: return "REQUEST_ARM";
+    case GateState::ACTIVE: return "ACTIVE";
+    case GateState::REQUEST_LAND: return "REQUEST_LAND";
+    case GateState::LANDING: return "LANDING";
+    case GateState::REQUEST_DISARM: return "REQUEST_DISARM";
+    case GateState::STANDBY_DISARMED: return "STANDBY_DISARMED";
+    case GateState::FAULT_LATCHED: return "FAULT_LATCHED";
+  }
+  return "UNKNOWN";
+}
+
 namespace
 {
 constexpr std::int64_t kPrestreamNs = 1000000000LL;
