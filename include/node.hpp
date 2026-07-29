@@ -9,12 +9,15 @@
 #include <px4_msgs/msg/timesync_status.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command_ack.hpp>
+#include <px4_msgs/msg/vehicle_land_detected.hpp>
 #include <px4_msgs/msg/vehicle_odometry.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/u_int8.hpp>
 
+#include <landing_monitor.hpp>
 #include <safety_gate.hpp>
 #include <safety_gate_adapter.hpp>
 #include <timestamp_gate.hpp>
@@ -50,12 +53,15 @@ private:
   const std::int64_t freshness_ns_;
   const std::int64_t timestamp_max_age_us_;
   const std::int64_t timestamp_max_future_us_;
+  const double home_surface_z_;
+  const double platform_surface_z_;
   std::string expected_owner_;
   std::string expected_lease_;
   std::string expected_epoch_;
   offboard_cpp::TimestampGate timestamp_gate_;
   bool timestamp_config_valid_{false};
   offboard_cpp::SafetyGate gate_;
+  offboard_cpp::LandingMonitor landing_monitor_;
   std::unique_ptr<offboard_cpp::SafetyGateAdapter> adapter_;
 
   px4_msgs::msg::TrajectorySetpoint setpoint_{};
@@ -67,6 +73,7 @@ private:
   std::int64_t rc_received_ns_{-1};
   std::int64_t setpoint_received_ns_{-1};
   std::int64_t mode_received_ns_{-1};
+  std::int64_t land_received_ns_{-1};
   std::int64_t manual_arm_received_ns_{-1};
   std::int64_t kill_received_ns_{-1};
   std::int64_t last_ros_time_ns_{-1};
@@ -74,7 +81,14 @@ private:
   std::uint64_t mode_sequence_{0};
   bool vehicle_in_offboard_{false};
   bool vehicle_armed_{false};
+  bool vehicle_landed_{false};
+  bool landing_confirmed_{false};
+  double altitude_z_{0.0};
+  double vertical_speed_{0.0};
+  double contact_surface_z_{0.0};
   std::uint64_t vehicle_status_generation_{0};
+  offboard_cpp::MissionRequest mission_request_{offboard_cpp::MissionRequest::NONE};
+  std::uint64_t mission_request_generation_{0};
   bool rc_valid_{false};
   bool odom_valid_{false};
   bool timestamp_fault_latched_{false};
@@ -82,6 +96,8 @@ private:
   bool manual_arm_enable_{false};
   bool recovery_requested_{false};
   bool activation_requested_{false};
+  bool last_recovery_signal_{false};
+  bool last_activation_signal_{false};
 
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
@@ -90,11 +106,14 @@ private:
   rclcpp::Subscription<px4_msgs::msg::TrajectorySetpoint>::SharedPtr setpoint_sub_;
   rclcpp::Subscription<px4_msgs::msg::OffboardControlMode>::SharedPtr mode_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleCommandAck>::SharedPtr ack_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_sub_;
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr authority_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr kill_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr manual_arm_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr activation_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr recovery_sub_;
+  rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr command_request_sub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr landing_confirmed_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

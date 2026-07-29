@@ -48,6 +48,32 @@ void SafetyGate::clear_pending()
   pending_deadline_ns_ = -1;
 }
 
+bool SafetyGate::consume_request(const GateInputs & inputs, MissionRequest request)
+{
+  if (inputs.mission_request_generation == 0 ||
+    inputs.mission_request_generation == last_request_generation_ ||
+    inputs.mission_request != request)
+  {
+    return false;
+  }
+  last_request_generation_ = inputs.mission_request_generation;
+  return true;
+}
+
+void SafetyGate::begin_rearm(std::int64_t now_ns)
+{
+  mode_acknowledged_ = false;
+  arm_acknowledged_ = false;
+  disarm_acknowledged_ = false;
+  mode_ack_status_generation_ = 0;
+  arm_ack_status_generation_ = 0;
+  disarm_ack_status_generation_ = 0;
+  confirmation_deadline_ns_ = -1;
+  prestream_started_ns_ = now_ns;
+  prestream_samples_ = 0;
+  state_ = GateState::PRESTREAM;
+}
+
 void SafetyGate::begin_pending(CommandKind command, std::int64_t now_ns, std::uint64_t sequence)
 {
   pending_command_ = command;
@@ -60,8 +86,11 @@ GateDecision SafetyGate::latch(const char * reason)
   clear_pending();
   mode_acknowledged_ = false;
   arm_acknowledged_ = false;
+  disarm_acknowledged_ = false;
   mode_ack_status_generation_ = 0;
   arm_ack_status_generation_ = 0;
+  disarm_ack_status_generation_ = 0;
+  confirmation_deadline_ns_ = -1;
   manual_activation_granted_ = false;
   state_ = GateState::FAULT_LATCHED;
   return decision(false, false, CommandKind::NONE, reason);
@@ -87,6 +116,9 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
 
   if (pending_command_ != CommandKind::NONE && now_ns >= pending_deadline_ns_) {
     return latch("command ACK timeout");
+  }
+  if (confirmation_deadline_ns_ >= 0 && now_ns >= confirmation_deadline_ns_) {
+    return latch("command status confirmation timeout");
   }
   if (pending_command_ != CommandKind::NONE &&
       inputs.authority.sequence != pending_sequence_) {
@@ -122,6 +154,7 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
           inputs.vehicle_status_generation <= mode_ack_status_generation_) {
         return decision(true, true, CommandKind::NONE, "awaiting fresh offboard status");
       }
+      confirmation_deadline_ns_ = -1;
       if (inputs.manual_arm_enable) {
         state_ = GateState::REQUEST_ARM;
         begin_pending(CommandKind::ARM, now_ns, inputs.authority.sequence);
@@ -133,13 +166,59 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
         return decision(true, true, CommandKind::NONE, "awaiting arm ACK");
       }
       if (inputs.vehicle_armed && inputs.vehicle_status_generation > arm_ack_status_generation_) {
+        confirmation_deadline_ns_ = -1;
         state_ = GateState::ACTIVE;
         return decision(true, true, CommandKind::NONE, "active armed");
       }
       return decision(true, true, CommandKind::NONE, "awaiting arm ACK and status");
     case GateState::ACTIVE:
+      if (!inputs.vehicle_armed || !inputs.vehicle_in_offboard) {
+        return latch("armed or offboard state lost while active");
+      }
+      if (consume_request(inputs, MissionRequest::LAND_HOME) ||
+        consume_request(inputs, MissionRequest::LAND_PLATFORM))
+      {
+        state_ = GateState::REQUEST_LAND;
+        begin_pending(CommandKind::LAND, now_ns, inputs.authority.sequence);
+        return decision(true, true, CommandKind::LAND, "request land");
+      }
       return decision(true, true, CommandKind::NONE, "active");
+    case GateState::REQUEST_LAND:
+      return decision(true, true, CommandKind::NONE, "awaiting land ACK");
+    case GateState::LANDING:
+      if (!inputs.vehicle_armed) {
+        state_ = GateState::STANDBY_DISARMED;
+        return decision(false, false, CommandKind::NONE, "landed and auto-disarmed");
+      }
+      if (consume_request(inputs, MissionRequest::DISARM)) {
+        if (!inputs.landing_confirmed) {
+          return latch("disarm requested before landing confirmation");
+        }
+        state_ = GateState::REQUEST_DISARM;
+        begin_pending(CommandKind::DISARM, now_ns, inputs.authority.sequence);
+        return decision(false, false, CommandKind::DISARM, "request disarm");
+      }
+      return decision(false, false, CommandKind::NONE, "landing");
+    case GateState::REQUEST_DISARM:
+      if (!disarm_acknowledged_) {
+        return decision(false, false, CommandKind::NONE, "awaiting disarm ACK");
+      }
+      if (!inputs.vehicle_armed &&
+        inputs.vehicle_status_generation > disarm_ack_status_generation_)
+      {
+        confirmation_deadline_ns_ = -1;
+        state_ = GateState::STANDBY_DISARMED;
+        return decision(false, false, CommandKind::NONE, "disarmed");
+      }
+      return decision(false, false, CommandKind::NONE, "awaiting fresh disarmed status");
     case GateState::STANDBY_DISARMED:
+      if (consume_request(inputs, MissionRequest::REARM)) {
+        if (!enable_arm_ || !inputs.manual_arm_enable || inputs.vehicle_armed) {
+          return latch("rearm denied");
+        }
+        begin_rearm(now_ns);
+        return decision(false, false, CommandKind::NONE, "rearm prestream entered");
+      }
       return decision(false, false, CommandKind::NONE, "standby: arming disabled");
     case GateState::FAULT_LATCHED:
       break;
@@ -158,20 +237,39 @@ GateDecision SafetyGate::observe_ack(
     return latch("unexpected or late ACK");
   }
   last_tick_ns_ = monotonic_ns;
-  const std::uint32_t expected_command = pending_command_ == CommandKind::SET_MODE_OFFBOARD
-    ? kVehicleCmdDoSetMode : kVehicleCmdArmDisarm;
+  std::uint32_t expected_command = kVehicleCmdArmDisarm;
+  if (pending_command_ == CommandKind::SET_MODE_OFFBOARD) {
+    expected_command = kVehicleCmdDoSetMode;
+  } else if (pending_command_ == CommandKind::LAND) {
+    expected_command = kVehicleCmdNavLand;
+  }
   if (!authority_matches(authority) || authority.sequence != pending_sequence_ ||
-      ack.result != AckResult::ACCEPTED || ack.command != expected_command ||
+      (ack.result != AckResult::ACCEPTED && ack.result != AckResult::IN_PROGRESS) ||
+      ack.command != expected_command ||
       ack.target_system != kTargetSystem || ack.target_component != kTargetComponent ||
       !ack.from_external) {
     return latch("ACK rejected or correlation mismatch");
   }
+  if (ack.result == AckResult::IN_PROGRESS) {
+    return decision(
+      pending_command_ != CommandKind::DISARM,
+      pending_command_ != CommandKind::DISARM,
+      CommandKind::NONE, "command in progress");
+  }
   if (pending_command_ == CommandKind::SET_MODE_OFFBOARD) {
     mode_acknowledged_ = true;
     mode_ack_status_generation_ = ack.status_generation;
-  } else {
+    confirmation_deadline_ns_ = monotonic_ns + kCommandTimeoutNs;
+  } else if (pending_command_ == CommandKind::ARM) {
     arm_acknowledged_ = true;
     arm_ack_status_generation_ = ack.status_generation;
+    confirmation_deadline_ns_ = monotonic_ns + kCommandTimeoutNs;
+  } else if (pending_command_ == CommandKind::LAND) {
+    state_ = GateState::LANDING;
+  } else if (pending_command_ == CommandKind::DISARM) {
+    disarm_acknowledged_ = true;
+    disarm_ack_status_generation_ = ack.status_generation;
+    confirmation_deadline_ns_ = monotonic_ns + kCommandTimeoutNs;
   }
   clear_pending();
   return decision(false, false, CommandKind::NONE, "ACK accepted; awaiting fresh status");
@@ -188,8 +286,11 @@ GateDecision SafetyGate::request_manual_recovery(std::int64_t monotonic_ns, cons
   prestream_samples_ = 0;
   mode_acknowledged_ = false;
   arm_acknowledged_ = false;
+  disarm_acknowledged_ = false;
   mode_ack_status_generation_ = 0;
   arm_ack_status_generation_ = 0;
+  disarm_ack_status_generation_ = 0;
+  confirmation_deadline_ns_ = -1;
   manual_activation_granted_ = false;
   clear_pending();
   return decision(false, false, CommandKind::NONE, "manual recovery acknowledged; waiting");
@@ -214,8 +315,12 @@ GateDecision SafetyGate::restart()
   prestream_samples_ = 0;
   mode_acknowledged_ = false;
   arm_acknowledged_ = false;
+  disarm_acknowledged_ = false;
   mode_ack_status_generation_ = 0;
   arm_ack_status_generation_ = 0;
+  disarm_ack_status_generation_ = 0;
+  confirmation_deadline_ns_ = -1;
+  last_request_generation_ = 0;
   manual_activation_granted_ = false;
   clear_pending();
   return decision(false, false, CommandKind::NONE, "restart safe");

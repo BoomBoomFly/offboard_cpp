@@ -28,6 +28,8 @@ add_library(px4_offboard_lib
   src/timestamp_gate.cpp
   src/safety_gate_adapter.cpp
   src/graph_guard.cpp
+  src/landing_monitor.cpp
+  src/flight_sequence.cpp
 )
 
 target_include_directories(px4_offboard_lib PUBLIC
@@ -60,6 +62,14 @@ if(BUILD_TESTING)
   )
   target_link_libraries(test_safety_gate px4_offboard_lib)
   add_test(NAME test_safety_gate COMMAND test_safety_gate)
+
+  add_executable(test_landing_monitor test/test_landing_monitor.cpp)
+  target_link_libraries(test_landing_monitor px4_offboard_lib)
+  add_test(NAME test_landing_monitor COMMAND test_landing_monitor)
+
+  add_executable(test_flight_sequence test/test_flight_sequence.cpp)
+  target_link_libraries(test_flight_sequence px4_offboard_lib)
+  add_test(NAME test_flight_sequence COMMAND test_flight_sequence)
 endif()
 
 # ---------------------------------------------
@@ -78,9 +88,23 @@ ament_target_dependencies(offboard_node
   px4_msgs
 )
 
+add_executable(flight_sequence_node
+  src/flight_sequence_node.cpp
+)
+target_link_libraries(flight_sequence_node px4_offboard_lib)
+ament_target_dependencies(flight_sequence_node rclcpp std_msgs px4_msgs)
+
+add_executable(offboard_authority_node
+  src/authority_publisher_node.cpp
+)
+target_link_libraries(offboard_authority_node px4_offboard_lib)
+ament_target_dependencies(offboard_authority_node rclcpp std_msgs px4_msgs)
+
 # 安装可执行文件
 install(TARGETS
   offboard_node
+  flight_sequence_node
+  offboard_authority_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
