@@ -130,7 +130,7 @@ install(TARGETS
 # 安装 launch 文件
 install(DIRECTORY
   launch/
-  DESTINATION share/${PROJECT_NAME}/
+  DESTINATION share/${PROJECT_NAME}/launch
   FILES_MATCHING PATTERN "offboard_control.launch.py"
 )
 
