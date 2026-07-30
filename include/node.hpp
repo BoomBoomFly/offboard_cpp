@@ -103,9 +103,7 @@ private:
   bool timestamp_fault_latched_{false};
   bool physical_kill_{false};
   bool manual_arm_enable_{false};
-  bool recovery_requested_{false};
   bool activation_requested_{false};
-  bool last_recovery_signal_{false};
   bool last_activation_signal_{false};
 
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
@@ -120,7 +118,6 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr kill_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr manual_arm_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr activation_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr recovery_sub_;
   rclcpp::Subscription<std_msgs::msg::UInt8>::SharedPtr command_request_sub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr landing_confirmed_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr flight_state_pub_;

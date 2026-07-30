@@ -38,12 +38,10 @@ public:
     kill_pub_ = create_publisher<std_msgs::msg::Bool>("/offboard/kill", qos);
     activation_pub_ = create_publisher<std_msgs::msg::Bool>("/offboard/manual_enable", qos);
     arm_pub_ = create_publisher<std_msgs::msg::Bool>("/offboard/manual_arm_enable", qos);
-    recovery_pub_ = create_publisher<std_msgs::msg::Bool>("/offboard/manual_recovery", qos);
 
     kill_sub_ = input("/operator/kill", &kill_, &kill_received_ns_);
     activation_sub_ = input("/operator/activation", &activation_, &activation_received_ns_);
     arm_sub_ = input("/operator/arm_enable", &arm_enable_, &arm_received_ns_);
-    recovery_sub_ = input("/operator/recovery", &recovery_, &recovery_received_ns_);
     timer_ = create_wall_timer(
       std::chrono::milliseconds(20), std::bind(&OffboardAuthorityNode::publish, this));
   }
@@ -101,8 +99,6 @@ private:
     activation_pub_->publish(value);
     value.data = fresh(arm_received_ns_, now) && arm_enable_;
     arm_pub_->publish(value);
-    value.data = fresh(recovery_received_ns_, now) && recovery_;
-    recovery_pub_->publish(value);
   }
 
   const std::string owner_;
@@ -112,20 +108,16 @@ private:
   bool kill_{true};
   bool activation_{false};
   bool arm_enable_{false};
-  bool recovery_{false};
   std::int64_t kill_received_ns_{-1};
   std::int64_t activation_received_ns_{-1};
   std::int64_t arm_received_ns_{-1};
-  std::int64_t recovery_received_ns_{-1};
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr authority_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr kill_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr activation_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr arm_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr recovery_pub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr kill_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr activation_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr arm_sub_;
-  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr recovery_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

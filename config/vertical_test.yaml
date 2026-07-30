@@ -57,17 +57,17 @@
     authority:
       input_freshness_ns: 300000000
 
-    # Fail-closed placeholders: replace only with measured channel mapping and thresholds.
+    # G1 measured RC semantics (zero-based RcChannels indices):
+    # CH6 +1 = application activation; CH7 +1 = human arm permission;
+    # CH8 +1 = kill. A 0.5 threshold separates the three-position levels.
     rc_operator:
       edge_hold_ns: 200000000
-      kill_channel: -1
-      activation_channel: -1
-      arm_enable_channel: -1
-      recovery_channel: -1
-      kill_threshold: 2.0
-      activation_threshold: 2.0
-      arm_enable_threshold: 2.0
-      recovery_threshold: 2.0
+      kill_channel: 7
+      activation_channel: 5
+      arm_enable_channel: 6
+      kill_threshold: 0.5
+      activation_threshold: 0.5
+      arm_enable_threshold: 0.5
 
     # 安全阈值与保护
     low_voltage: 13.2     # 低电压报警阈值 (针对 4S 电池)

@@ -170,12 +170,6 @@ OffboardControlNode::OffboardControlNode()
       activation_requested_ = message->data && !last_activation_signal_;
       last_activation_signal_ = message->data;
     });
-  recovery_sub_ = create_subscription<std_msgs::msg::Bool>(
-    "offboard/manual_recovery", qos,
-    [this](std_msgs::msg::Bool::SharedPtr message) {
-      recovery_requested_ = message->data && !last_recovery_signal_;
-      last_recovery_signal_ = message->data;
-    });
   command_request_sub_ = create_subscription<std_msgs::msg::UInt8>(
     "offboard/command_request", qos,
     [this](std_msgs::msg::UInt8::SharedPtr message) {
@@ -404,15 +398,7 @@ void OffboardControlNode::on_timer()
 
   const auto current_inputs = inputs();
   offboard_cpp::GateDecision result;
-  if (recovery_requested_) {
-    recovery_requested_ = false;
-    if (timestamp_fault_latched_) {
-      reset_timestamp_epoch_inputs();
-      result = gate_.tick(steady_now, inputs());
-    } else {
-      result = gate_.request_manual_recovery(steady_now, current_inputs);
-    }
-  } else if (activation_requested_) {
+  if (activation_requested_) {
     activation_requested_ = false;
     result = gate_.request_manual_activation(steady_now, current_inputs);
   } else {

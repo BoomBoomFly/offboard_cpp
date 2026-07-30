@@ -121,7 +121,7 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
   }
   last_tick_ns_ = now_ns;
   if (state_ == GateState::FAULT_LATCHED) {
-    return decision(false, false, CommandKind::NONE, "manual recovery required");
+    return decision(false, false, CommandKind::NONE, "controller restart required");
   }
   if (!ready(inputs)) {
     // Any loss after PRESTREAM is a latched safety event.  WAIT intentionally
@@ -293,26 +293,6 @@ GateDecision SafetyGate::observe_ack(
   return decision(false, false, CommandKind::NONE, "ACK accepted; awaiting fresh status");
 }
 
-GateDecision SafetyGate::request_manual_recovery(std::int64_t monotonic_ns, const GateInputs & inputs)
-{
-  if (state_ != GateState::FAULT_LATCHED || !ready(inputs) || monotonic_ns < last_tick_ns_) {
-    return decision(false, false, CommandKind::NONE, "manual recovery denied");
-  }
-  state_ = GateState::WAIT;
-  last_tick_ns_ = monotonic_ns;
-  prestream_started_ns_ = -1;
-  prestream_samples_ = 0;
-  mode_acknowledged_ = false;
-  arm_acknowledged_ = false;
-  disarm_acknowledged_ = false;
-  mode_ack_status_generation_ = 0;
-  arm_ack_status_generation_ = 0;
-  disarm_ack_status_generation_ = 0;
-  confirmation_deadline_ns_ = -1;
-  manual_activation_granted_ = false;
-  clear_pending();
-  return decision(false, false, CommandKind::NONE, "manual recovery acknowledged; waiting");
-}
 
 GateDecision SafetyGate::request_manual_activation(
   std::int64_t monotonic_ns, const GateInputs & inputs)

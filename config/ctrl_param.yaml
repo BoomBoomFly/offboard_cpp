@@ -63,11 +63,9 @@
       kill_channel: -1
       activation_channel: -1
       arm_enable_channel: -1
-      recovery_channel: -1
       kill_threshold: 2.0
       activation_threshold: 2.0
       arm_enable_threshold: 2.0
-      recovery_threshold: 2.0
 
     # 安全阈值与保护
     low_voltage: 13.2     # 低电压报警阈值 (针对 4S 电池)

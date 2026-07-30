@@ -116,7 +116,6 @@ public:
   // an unchanged current authority sequence.
   GateDecision observe_ack(
     std::int64_t monotonic_ns, const CommandAck & ack, const Authority & authority);
-  GateDecision request_manual_recovery(std::int64_t monotonic_ns, const GateInputs & inputs);
   GateDecision request_manual_activation(std::int64_t monotonic_ns, const GateInputs & inputs);
   GateDecision restart();
 

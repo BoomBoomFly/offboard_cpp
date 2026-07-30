@@ -260,22 +260,6 @@ void test_every_readiness_failure_and_restart_is_zero_output()
   assert(!value.tick(0, GateInputs{}).publish_setpoint);
 }
 
-void test_manual_recovery_never_auto_active()
-{
-  auto value = gate();
-  auto inputs = ready_inputs();
-  value.request_manual_activation(0, inputs);
-  value.tick(0, inputs);
-  inputs.kill_latched = true;
-  assert(value.tick(1, inputs).fault_latched);
-  inputs = ready_inputs();
-  assert(value.tick(2, inputs).state == GateState::FAULT_LATCHED);
-  assert(value.request_manual_recovery(3, inputs).state == GateState::WAIT);
-  assert(value.tick(4, inputs).state == GateState::WAIT);
-  assert(value.request_manual_activation(5, inputs).state == GateState::WAIT);
-  assert(value.tick(6, inputs).state == GateState::PRESTREAM);
-}
-
 void test_activation_and_ack_timestamps_cannot_rollback()
 {
   auto inputs = ready_inputs();
@@ -485,7 +469,6 @@ int main()
   test_ack_reject_timeout_command_and_sequence_fail_closed();
   test_each_ack_rejection_and_timeout();
   test_every_readiness_failure_and_restart_is_zero_output();
-  test_manual_recovery_never_auto_active();
   test_activation_and_ack_timestamps_cannot_rollback();
   test_arm_requires_explicit_enable_and_manual_gate();
   test_px4_timestamp_gate_rejects_bad_clock_data_and_old_epochs();

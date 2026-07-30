@@ -28,7 +28,6 @@ public:
     kill_pub_ = create_publisher<std_msgs::msg::Bool>("/operator/kill", qos);
     activation_pub_ = create_publisher<std_msgs::msg::Bool>("/operator/activation", qos);
     arm_pub_ = create_publisher<std_msgs::msg::Bool>("/operator/arm_enable", qos);
-    recovery_pub_ = create_publisher<std_msgs::msg::Bool>("/operator/recovery", qos);
     rc_sub_ = create_subscription<px4_msgs::msg::RcChannels>("/fmu/out/rc_channels", qos,
       [this](px4_msgs::msg::RcChannels::SharedPtr message) {
         offboard_cpp::RcSample sample;
@@ -52,18 +51,15 @@ private:
     config.kill_channel = declare_parameter<int>("rc_operator.kill_channel", -1);
     config.activation_channel = declare_parameter<int>("rc_operator.activation_channel", -1);
     config.arm_enable_channel = declare_parameter<int>("rc_operator.arm_enable_channel", -1);
-    config.recovery_channel = declare_parameter<int>("rc_operator.recovery_channel", -1);
     config.kill_threshold = declare_parameter<double>("rc_operator.kill_threshold", 2.0);
     config.activation_threshold = declare_parameter<double>("rc_operator.activation_threshold", 2.0);
     config.arm_enable_threshold = declare_parameter<double>("rc_operator.arm_enable_threshold", 2.0);
-    config.recovery_threshold = declare_parameter<double>("rc_operator.recovery_threshold", 2.0);
     config.freshness_ns = declare_parameter<std::int64_t>("freshness.rc_ns", 300000000LL);
     return config;
   }
   void publish(const offboard_cpp::OperatorSignals & signals, std::int64_t now_ns)
   {
     if (signals.activation) {activation_until_ns_ = now_ns + edge_hold_ns_;}
-    if (signals.recovery) {recovery_until_ns_ = now_ns + edge_hold_ns_;}
     std_msgs::msg::Bool message;
     message.data = !signals.valid || signals.kill;
     kill_pub_->publish(message);
@@ -71,17 +67,13 @@ private:
     activation_pub_->publish(message);
     message.data = signals.valid && signals.arm_enable;
     arm_pub_->publish(message);
-    message.data = signals.valid && now_ns < recovery_until_ns_;
-    recovery_pub_->publish(message);
   }
   offboard_cpp::RcOperatorAdapter adapter_;
   std::int64_t edge_hold_ns_{0};
   std::int64_t activation_until_ns_{-1};
-  std::int64_t recovery_until_ns_{-1};
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr kill_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr activation_pub_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr arm_pub_;
-  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr recovery_pub_;
   rclcpp::Subscription<px4_msgs::msg::RcChannels>::SharedPtr rc_sub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

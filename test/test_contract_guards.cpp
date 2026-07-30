@@ -15,11 +15,9 @@ RcOperatorConfig rc_config()
   config.kill_channel = 0;
   config.activation_channel = 1;
   config.arm_enable_channel = 2;
-  config.recovery_channel = 3;
   config.kill_threshold = 0.5;
   config.activation_threshold = 0.5;
   config.arm_enable_threshold = 0.5;
-  config.recovery_threshold = 0.5;
   config.freshness_ns = 300000000LL;
   return config;
 }
@@ -35,7 +33,7 @@ void test_rc_fail_closed_and_edges()
   sample.timestamp_us = 1000;
   sample.received_ns = 0;
   sample.signal_lost = false;
-  sample.channels = {-1.0F, -1.0F, 1.0F, -1.0F};
+  sample.channels = {-1.0F, -1.0F, 1.0F};
   auto signals = adapter.update(sample, 0);
   assert(signals.valid && !signals.kill && !signals.activation && signals.arm_enable);
   sample.timestamp_us = 1001;

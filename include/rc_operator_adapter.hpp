@@ -11,11 +11,9 @@ struct RcOperatorConfig
   int kill_channel{-1};
   int activation_channel{-1};
   int arm_enable_channel{-1};
-  int recovery_channel{-1};
   double kill_threshold{2.0};
   double activation_threshold{2.0};
   double arm_enable_threshold{2.0};
-  double recovery_threshold{2.0};
   std::int64_t freshness_ns{0};
 };
 struct RcSample
@@ -30,7 +28,6 @@ struct OperatorSignals
   bool kill{true};
   bool activation{false};
   bool arm_enable{false};
-  bool recovery{false};
   bool valid{false};
 };
 class RcOperatorAdapter
@@ -46,7 +43,6 @@ private:
   RcSample last_sample_{};
   bool have_sample_{false};
   bool last_activation_level_{false};
-  bool last_recovery_level_{false};
 };
 }  // namespace offboard_cpp
 #endif  // OFFBOARD_CPP_RC_OPERATOR_ADAPTER_HPP
