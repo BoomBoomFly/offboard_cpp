@@ -89,15 +89,26 @@ FlightOutput FlightSequence::tick(const FlightInputs & inputs)
       break;
     case MissionState::TAKEOFF: {
         auto target = home_;
-        target[2] = config_.home_surface_z - config_.takeoff_height;
+        target[2] =
+          (config_.relative_takeoff_height ? home_[2] : config_.home_surface_z) -
+          config_.takeoff_height;
         move_toward(target, config_.takeoff_speed, dt);
-        if (close_to(inputs.position, target)) {
+        // Do not freeze the ramped command at the edge of the position
+        // tolerance.  The commanded trajectory must first reach the full
+        // requested height, then the measured vehicle may enter hover.
+        if (command_ == target && close_to(inputs.position, target)) {
           enter(
+            config_.task == MissionTask::VERTICAL_TEST && config_.hold_after_takeoff ?
+            MissionState::HOVER :
             config_.task == MissionTask::TASK2 ? MissionState::ACQUIRE_CAR :
             MissionState::HOVER_3S, inputs.now_ns);
         }
         break;
       }
+    case MissionState::HOVER:
+      // Keep publishing the reached position until the operator leaves
+      // Offboard or a freshness/safety gate stops the output.
+      break;
     case MissionState::HOVER_3S:
       if (inputs.now_ns - entered_ns_ >=
         static_cast<std::int64_t>(config_.hover_seconds * 1.0e9))
@@ -246,6 +257,7 @@ const char * mission_state_name(MissionState state)
   switch (state) {
     case MissionState::WAIT_START: return "WAIT_START";
     case MissionState::TAKEOFF: return "TAKEOFF";
+    case MissionState::HOVER: return "HOVER";
     case MissionState::HOVER_3S: return "HOVER_3S";
     case MissionState::ACQUIRE_CAR: return "ACQUIRE_CAR";
     case MissionState::FOLLOW: return "FOLLOW";

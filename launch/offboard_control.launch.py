@@ -21,6 +21,18 @@ def generate_launch_description():
             description="Reviewed offboard config; vertical_test.yaml is the first-flight envelope"),
         DeclareLaunchArgument("task_id", default_value="3"),
         DeclareLaunchArgument(
+            "hover_height",
+            default_value="0.5",
+            description="Vertical-test hover height above the START position in metres"),
+        DeclareLaunchArgument(
+            "relative_takeoff_height",
+            default_value="true",
+            description="Interpret hover_height relative to the START position"),
+        DeclareLaunchArgument(
+            "hold_after_takeoff",
+            default_value="true",
+            description="Hold the vertical-test setpoint until operator takeover"),
+        DeclareLaunchArgument(
             'enable_arm',
             default_value='false',
             description='Explicit arm/rearm permission; false is the production-safe default'),
@@ -64,6 +76,12 @@ def generate_launch_description():
                 'use_sim_time': common_time,
                 'mission.task_id': ParameterValue(
                     LaunchConfiguration('task_id'), value_type=int),
+                'mission.takeoff_height': ParameterValue(
+                    LaunchConfiguration('hover_height'), value_type=float),
+                'mission.relative_takeoff_height': ParameterValue(
+                    LaunchConfiguration('relative_takeoff_height'), value_type=bool),
+                'mission.hold_after_takeoff': ParameterValue(
+                    LaunchConfiguration('hold_after_takeoff'), value_type=bool),
                 'mission.expected_source_epoch': ParameterValue(
                     LaunchConfiguration('mission_source_epoch'), value_type=int),
             },

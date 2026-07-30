@@ -2,9 +2,11 @@
 
 ## 普通垂直飞行生产契约（当前权威）
 
-本阶段仅实现 T265 定位下的垂直起飞、悬停 3 秒和 PX4 Land。`MissionTask::VERTICAL_TEST` 固定编号为 3；状态序列为 `WAIT_START -> TAKEOFF -> HOVER_3S -> HOME_DESCEND -> LAND_CONFIRMED -> DISARMED -> COMPLETE`，不会进入小车跟随或投放状态。
+本阶段默认实现 T265 定位下相对 START 位置的 0.5 m 垂直起飞和持续悬停。`MissionTask::VERTICAL_TEST` 固定编号为 3；默认状态序列为 `WAIT_START -> TAKEOFF -> HOVER`，不会进入小车跟随、投放或自动降落状态。操作员通过 QGC/RC 退出 Offboard 接管；任何新鲜度或安全门失败都会停止输出并锁存故障。
 
-- `config/vertical_test.yaml`：0.5 m、上升不超过 0.3 m/s、下降不超过 0.2 m/s。
+- `config/vertical_test.yaml`：目标为 START 时 T265/PX4 NED 高度减 0.5 m，上升不超过 0.3 m/s，默认持续悬停。
+- `mission.hold_after_takeoff=false` 可恢复“悬停 `hover_seconds` 后自动下降并请求 PX4 Land”的闭环测试。
+- launch 可用 `hover_height:=0.5`、`relative_takeoff_height:=true` 和 `hold_after_takeoff:=true` 显式覆盖悬停包线。
 - `config/contest_task1.yaml`：仅保存 1.5 m 比赛参数，本阶段不得用于实机。
 - `/mission/start` 必须是 `std_msgs/msg/UInt32`；0 无效、1/2 为赛题任务、3 为 VERTICAL_TEST。
 - START 前必须先发布 volatile `/mission/start/context`（`std_msgs/msg/UInt64`）：bit 15:0 mission_id、23:16 session_id、31:24 seq、63:32 source_epoch。上下文超过 500 ms、任务不匹配、旧 session/seq/epoch、重复或运行中事件全部拒绝。

@@ -15,6 +15,7 @@ enum class MissionState
 {
   WAIT_START,
   TAKEOFF,
+  HOVER,
   HOVER_3S,
   ACQUIRE_CAR,
   FOLLOW,
@@ -42,6 +43,8 @@ struct FlightConfig
   double platform_land_speed{0.2};
   double takeoff_height{1.0};
   double hover_seconds{3.0};
+  bool relative_takeoff_height{false};
+  bool hold_after_takeoff{false};
   double platform_hold_seconds{5.0};
   double position_tolerance{0.20};
   double home_surface_z{0.0};

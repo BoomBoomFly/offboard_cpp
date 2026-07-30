@@ -23,6 +23,8 @@
       home_land_speed: 0.3
       platform_land_speed: 0.2
       takeoff_height: 1.0
+      relative_takeoff_height: false
+      hold_after_takeoff: false
       hover_seconds: 3.0
       platform_hold_seconds: 5.0
       position_tolerance: 0.2

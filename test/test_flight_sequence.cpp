@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cmath>
 
 #include <flight_sequence.hpp>
 
@@ -84,7 +85,31 @@ void test_start_is_latched_until_fresh_armed_status()
   assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
 }
 
-void test_vertical_test_never_enters_contest_states()
+void test_vertical_hover_holds_relative_to_start_position()
+{
+  FlightConfig config;
+  config.task = MissionTask::VERTICAL_TEST;
+  config.takeoff_height = 0.5;
+  config.takeoff_speed = 5.0;
+  config.relative_takeoff_height = true;
+  config.hold_after_takeoff = true;
+  FlightSequence sequence(config);
+  auto inputs = base();
+  inputs.position = {1.0, -2.0, 0.35};
+  inputs.start = true;
+  assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
+  inputs.start = false;
+  follow_command(sequence, inputs, MissionState::HOVER, 200);
+  inputs.now_ns += 10000000000LL;
+  const auto output = sequence.tick(inputs);
+  assert(output.state == MissionState::HOVER);
+  assert(output.request == MissionRequest::NONE);
+  assert(output.position[0] == 1.0);
+  assert(output.position[1] == -2.0);
+  assert(std::abs(output.position[2] - (-0.15)) < 1.0e-9);
+}
+
+void test_vertical_test_can_auto_land_when_hold_is_disabled()
 {
   FlightConfig config;
   config.task = MissionTask::VERTICAL_TEST;
@@ -177,7 +202,8 @@ int main()
 {
   test_task1_normal_landing();
   test_start_is_latched_until_fresh_armed_status();
-  test_vertical_test_never_enters_contest_states();
+  test_vertical_hover_holds_relative_to_start_position();
+  test_vertical_test_can_auto_land_when_hold_is_disabled();
   test_task2_platform_land_rearm_and_home_land();
   return 0;
 }

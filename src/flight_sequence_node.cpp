@@ -140,6 +140,10 @@ private:
     config.platform_land_speed = declare_parameter<double>("mission.platform_land_speed", 0.2);
     config.takeoff_height = declare_parameter<double>("mission.takeoff_height", 1.0);
     config.hover_seconds = declare_parameter<double>("mission.hover_seconds", 3.0);
+    config.relative_takeoff_height =
+      declare_parameter<bool>("mission.relative_takeoff_height", false);
+    config.hold_after_takeoff =
+      declare_parameter<bool>("mission.hold_after_takeoff", false);
     config.platform_hold_seconds = declare_parameter<double>("mission.platform_hold_seconds", 5.0);
     config.position_tolerance = declare_parameter<double>("mission.position_tolerance", 0.2);
     config.home_surface_z = declare_parameter<double>("mission.home_surface_z", 0.0);
@@ -152,6 +156,10 @@ private:
       config.takeoff_height <= 0.0 || config.position_tolerance <= 0.0)
     {
       throw std::invalid_argument("mission speeds, height and tolerance must be positive");
+    }
+    if (config.hold_after_takeoff && config.task != offboard_cpp::MissionTask::VERTICAL_TEST) {
+      throw std::invalid_argument(
+              "mission.hold_after_takeoff is only valid for VERTICAL_TEST");
     }
     return config;
   }
