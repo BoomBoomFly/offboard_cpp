@@ -14,15 +14,22 @@ RcOperatorAdapter::RcOperatorAdapter(RcOperatorConfig config)
 }
 bool RcOperatorAdapter::config_valid() const
 {
-  const int required_channels[] = {config_.kill_channel, config_.activation_channel,
-    config_.arm_enable_channel};
-  const double required_thresholds[] = {config_.kill_threshold, config_.activation_threshold,
-    config_.arm_enable_threshold};
+  // Kill and activation are safety-critical and therefore always required.
+  // Arming permission is optional when PX4 has no separate RC arm mapping.
+  const int required_channels[] = {config_.kill_channel, config_.activation_channel};
+  const double required_thresholds[] = {config_.kill_threshold, config_.activation_threshold};
   for (const auto channel : required_channels) {
     if (channel < 0 || channel >= 18) {return false;}
   }
   for (const auto threshold : required_thresholds) {
     if (!std::isfinite(threshold) || threshold < -1.0 || threshold > 1.0) {return false;}
+  }
+  if (config_.arm_enable_channel >= 18 ||
+    (config_.arm_enable_channel >= 0 &&
+    (!std::isfinite(config_.arm_enable_threshold) || config_.arm_enable_threshold < -1.0 ||
+    config_.arm_enable_threshold > 1.0)))
+  {
+    return false;
   }
   return config_.freshness_ns > 0;
 }
@@ -44,7 +51,8 @@ OperatorSignals RcOperatorAdapter::evaluate(
   }
   const bool kill_level = sample.channels[config_.kill_channel] >= config_.kill_threshold;
   const bool activation_level = sample.channels[config_.activation_channel] >= config_.activation_threshold;
-  const bool arm_level = sample.channels[config_.arm_enable_channel] >= config_.arm_enable_threshold;
+  const bool arm_level = config_.arm_enable_channel >= 0 &&
+    sample.channels[config_.arm_enable_channel] >= config_.arm_enable_threshold;
   result.valid = true;
   result.kill = kill_level;
   result.arm_enable = arm_level;

@@ -9,7 +9,7 @@ TEST(TopicContractTest, VehicleStatusMatchesPx4V1162BridgeContract)
 {
     EXPECT_STREQ(
         offboard_topics::kVehicleStatus,
-        "fmu/out/vehicle_status_v1");
+        "/fmu/out/vehicle_status_v1");
 }
 
 TEST(TopicContractTest, IntegrationTopicsHaveDedicatedMeanings)

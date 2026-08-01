@@ -22,35 +22,43 @@ const char * gate_state_name(GateState state)
 
 namespace
 {
-constexpr std::int64_t kPrestreamNs = 1000000000LL;
-constexpr std::uint32_t kPrestreamSamples = 20;
 constexpr std::int64_t kCommandTimeoutNs = 3000000000LL;
 }  // namespace
 
 SafetyGate::SafetyGate(
   std::string expected_owner, std::string expected_lease, std::string expected_epoch,
-  bool enable_arm)
+  bool auto_arm, std::int64_t prestream_ns, std::uint32_t prestream_samples,
+  bool require_armed_before_offboard)
 : expected_owner_(std::move(expected_owner)),
   expected_lease_(std::move(expected_lease)),
   expected_epoch_(std::move(expected_epoch)),
-  enable_arm_(enable_arm)
+  auto_arm_(auto_arm),
+  require_armed_before_offboard_(require_armed_before_offboard),
+  prestream_ns_(prestream_ns > 0 ? prestream_ns : 2000000000LL),
+  prestream_samples_required_(prestream_samples > 0 ? prestream_samples : 40)
 {
 }
 
 bool SafetyGate::authority_matches(const Authority & authority) const
 {
-  return authority.fresh && authority.single_writer && authority.single_owner &&
+  return authority.fresh && authority.single_writer &&
+         (authority.single_owner || !auto_arm_) &&
          !expected_owner_.empty() && !expected_lease_.empty() && !expected_epoch_.empty() &&
          authority.owner_id == expected_owner_ && authority.lease_id == expected_lease_ &&
          authority.epoch == expected_epoch_ && authority.sequence != 0;
 }
 
-bool SafetyGate::ready(const GateInputs & inputs) const
+bool SafetyGate::stream_ready(const GateInputs & inputs) const
 {
   return inputs.clock_monotonic && !inputs.kill_latched &&
-         inputs.vehicle_status_fresh && inputs.odometry_fresh && inputs.timesync_fresh &&
-         inputs.rc_fresh && inputs.kill_fresh && inputs.setpoint_fresh && inputs.mode_fresh &&
+         inputs.odometry_fresh && inputs.timesync_fresh &&
+         inputs.setpoint_fresh && inputs.mode_fresh &&
          inputs.setpoint_mode_paired && authority_matches(inputs.authority);
+}
+
+bool SafetyGate::ready(const GateInputs & inputs) const
+{
+  return stream_ready(inputs) && inputs.vehicle_status_fresh;
 }
 
 GateDecision SafetyGate::decision(
@@ -123,13 +131,12 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
   if (state_ == GateState::FAULT_LATCHED) {
     return decision(false, false, CommandKind::NONE, "controller restart required");
   }
-  if (!ready(inputs)) {
-    // Any loss after PRESTREAM is a latched safety event.  WAIT intentionally
-    // remains quiet so boot-order races cannot become a self-latching restart loop.
+  const bool stream_only = state_ == GateState::WAIT || state_ == GateState::PRESTREAM;
+  if (!(stream_only ? stream_ready(inputs) : ready(inputs))) {
     if (state_ != GateState::WAIT) {
       return latch(inputs.kill_latched ? "kill latch" : "readiness lost");
     }
-    return decision(false, false, CommandKind::NONE, "waiting for fresh complete authority");
+    return decision(false, false, CommandKind::NONE, "waiting for fresh stream authority");
   }
 
   if (pending_command_ != CommandKind::NONE && now_ns >= pending_deadline_ns_) {
@@ -145,19 +152,34 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
 
   switch (state_) {
     case GateState::WAIT:
-      if (!manual_activation_granted_) {
-        return decision(false, false, CommandKind::NONE, "manual activation required");
+      if (require_armed_before_offboard_ && !inputs.vehicle_armed) {
+        return decision(false, false, CommandKind::NONE, "waiting for manual arm");
       }
       state_ = GateState::PRESTREAM;
       prestream_started_ns_ = now_ns;
       prestream_samples_ = 0;
-      return decision(false, false, CommandKind::NONE, "prestream entered");
+      return decision(true, true, CommandKind::NONE, "prestream entered");
     case GateState::PRESTREAM:
+      if (require_armed_before_offboard_ && !inputs.vehicle_armed) {
+        return restart();
+      }
       ++prestream_samples_;
-      if (now_ns - prestream_started_ns_ >= kPrestreamNs && prestream_samples_ >= kPrestreamSamples) {
-        if (!enable_arm_) {
-          state_ = GateState::STANDBY_DISARMED;
-          return decision(false, false, CommandKind::NONE, "standby: arming disabled");
+      if (now_ns - prestream_started_ns_ >= prestream_ns_ &&
+          prestream_samples_ >= prestream_samples_required_) {
+        if (!inputs.vehicle_status_fresh) {
+          return decision(true, true, CommandKind::NONE,
+            "waiting for vehicle status before mode request");
+        }
+        // The operator may already have selected Offboard manually.  Once a
+        // full prestream and all authority checks have completed, that fresh
+        // status is sufficient confirmation; re-sending DO_SET_MODE makes
+        // PX4 reject an idempotent mode change and needlessly latches safety.
+        if (inputs.vehicle_in_offboard) {
+          state_ = GateState::REQUEST_MODE;
+          mode_acknowledged_ = true;
+          mode_ack_status_generation_ = 0;
+          confirmation_deadline_ns_ = -1;
+          return decision(true, true, CommandKind::NONE, "offboard already active");
         }
         state_ = GateState::REQUEST_MODE;
         begin_pending(CommandKind::SET_MODE_OFFBOARD, now_ns, inputs.authority.sequence);
@@ -165,6 +187,9 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
       }
       return decision(true, true, CommandKind::NONE, "prestream");
     case GateState::REQUEST_MODE:
+      if (require_armed_before_offboard_ && !inputs.vehicle_armed) {
+        return restart();
+      }
       if (!mode_acknowledged_) {
         return decision(true, true, CommandKind::NONE, "awaiting mode ACK");
       }
@@ -173,12 +198,12 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
         return decision(true, true, CommandKind::NONE, "awaiting fresh offboard status");
       }
       confirmation_deadline_ns_ = -1;
-      if (inputs.manual_arm_enable) {
+      if (auto_arm_) {
         state_ = GateState::REQUEST_ARM;
         begin_pending(CommandKind::ARM, now_ns, inputs.authority.sequence);
         return decision(true, true, CommandKind::ARM, "request arm");
       }
-      return decision(true, true, CommandKind::NONE, "awaiting manual arm enable");
+      return decision(true, true, CommandKind::NONE, "offboard active; auto arm disabled");
     case GateState::REQUEST_ARM:
       if (!arm_acknowledged_) {
         return decision(true, true, CommandKind::NONE, "awaiting arm ACK");
@@ -231,13 +256,13 @@ GateDecision SafetyGate::tick(std::int64_t now_ns, const GateInputs & inputs)
       return decision(false, false, CommandKind::NONE, "awaiting fresh disarmed status");
     case GateState::STANDBY_DISARMED:
       if (consume_request(inputs, MissionRequest::REARM)) {
-        if (!enable_arm_ || !inputs.manual_arm_enable || inputs.vehicle_armed) {
+        if (!auto_arm_ || inputs.vehicle_armed) {
           return latch("rearm denied");
         }
         begin_rearm(now_ns);
         return decision(false, false, CommandKind::NONE, "rearm prestream entered");
       }
-      return decision(false, false, CommandKind::NONE, "standby: arming disabled");
+      return decision(true, true, CommandKind::NONE, "standby: arming disabled");
     case GateState::FAULT_LATCHED:
       break;
   }

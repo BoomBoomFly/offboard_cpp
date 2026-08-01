@@ -53,6 +53,16 @@ void test_rc_fail_closed_and_edges()
   sample.signal_lost = false;
   sample.channels[0] = 2.0F;
   assert(adapter.update(sample, sample.received_ns).kill);
+
+  auto no_arm_config = rc_config();
+  no_arm_config.arm_enable_channel = -1;
+  no_arm_config.arm_enable_threshold = 2.0;
+  RcOperatorAdapter no_arm_adapter(no_arm_config);
+  sample.channels[0] = -1.0F;
+  sample.timestamp_us = 1004;
+  sample.received_ns += 20000000LL;
+  const auto no_arm_signals = no_arm_adapter.update(sample, sample.received_ns);
+  assert(no_arm_signals.valid && !no_arm_signals.kill && !no_arm_signals.arm_enable);
 }
 void test_start_session_freshness_duplicate_and_old_epoch()
 {

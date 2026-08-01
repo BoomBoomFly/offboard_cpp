@@ -3,7 +3,7 @@
     # 消息超时设置 (单位: 秒)
     msg_timeout:
       rc: 0.5             # 遥控器信号超时
-      odom: 0.5           # 里程计 (T265/VIO) 超时
+      odom: 1.5           # 里程计 (D435i VIO) 超时
       offboard: 0.5       # Offboard 控制指令频率检查
       offboardMode: 0.5   # Offboard 模式反馈超时
       bat: 0.5            # 电池状态回调超时
@@ -22,7 +22,8 @@
       cruise_speed: 1.0
       home_land_speed: 0.2
       platform_land_speed: 0.2
-      takeoff_height: 0.5
+      takeoff_height: 1.0
+      auto_takeoff: false
       # T265/PX4 NED: target Z = the armed START position Z - 0.5 m.
       relative_takeoff_height: true
       # Hold indefinitely at 0.5 m; the operator exits via QGC/RC takeover.
@@ -37,20 +38,30 @@
       yaw: 0.0
 
     freshness:
-      odometry_ns: 200000000
+      odometry_ns: 1500000000
       rc_ns: 300000000
       timesync_ns: 2500000000
-      vehicle_status_ns: 1200000000
+      # PX4 VehicleStatus is a low-rate status stream.  Keep enough margin for
+      # one delayed sample while still failing closed on a genuine loss.
+      vehicle_status_ns: 2500000000
       land_detected_ns: 1800000000
-      setpoint_ns: 150000000
-      mode_ns: 150000000
+      # The 20 Hz sequence stream may briefly miss a scheduler tick; 300 ms
+      # still requires more than PX4's 2 Hz minimum Offboard stream rate.
+      setpoint_ns: 300000000
+      mode_ns: 300000000
       operator_ns: 300000000
       authority_ns: 500000000
       mission_input_ns: 500000000
 
     safety:
+      require_armed_before_offboard: true
       timestamp_max_age_us: 2000000
       timestamp_max_future_us: 100000
+
+    # ROS never arms the vehicle. After manual RC arm, send a two-second
+    # Offboard prestream, request Offboard, then permit the hover task.
+    auto_arm: false
+    offboard_warmup_seconds: 2.0
 
     landing:
       stable_ns: 1000000000
@@ -61,17 +72,17 @@
     authority:
       input_freshness_ns: 300000000
 
-    # G1 measured RC semantics (zero-based RcChannels indices):
-    # CH6 +1 = application activation; CH7 +1 = human arm permission;
-    # CH8 +1 = kill. A 0.5 threshold separates the three-position levels.
+    # PX4 2026.8.1.params mapping (zero-based RcChannels indices):
+    # CH6 +1 = Offboard activation; CH8 +1 = kill. RC_MAP_ARM_SW=0,
+    # so CH7 is intentionally unused by this application.
     rc_operator:
       edge_hold_ns: 200000000
       kill_channel: 7
       activation_channel: 5
-      arm_enable_channel: 6
+      arm_enable_channel: -1
       kill_threshold: 0.5
       activation_threshold: 0.5
-      arm_enable_threshold: 0.5
+      arm_enable_threshold: 2.0
 
     # 安全阈值与保护
     low_voltage: 13.2     # 低电压报警阈值 (针对 4S 电池)

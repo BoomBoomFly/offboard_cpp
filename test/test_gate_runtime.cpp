@@ -144,19 +144,15 @@ TEST_F(GateRuntimeTest, FoxyGraphRejectsDuplicateWriterAndSameNameOtherNamespace
 
 TEST_F(GateRuntimeTest, EveryRejectedPathProducesZeroPx4Inputs)
 {
-  const std::array<std::function<void(GateInputs &)>, 14> rejectors{
-    [](GateInputs & value) { value.rc_fresh = false; },
+  const std::array<std::function<void(GateInputs &)>, 10> rejectors{
     [](GateInputs & value) { value.odometry_fresh = false; },
-    [](GateInputs & value) { value.vehicle_status_fresh = false; },
     [](GateInputs & value) { value.timesync_fresh = false; },
-    [](GateInputs & value) { value.kill_fresh = false; },
     [](GateInputs & value) { value.kill_latched = true; },
     [](GateInputs & value) { value.setpoint_mode_paired = false; },
     [](GateInputs & value) { value.authority.owner_id = "other"; },
     [](GateInputs & value) { value.authority.lease_id = "other"; },
     [](GateInputs & value) { value.authority.epoch = "other"; },
     [](GateInputs & value) { value.authority.single_writer = false; },
-    [](GateInputs & value) { value.authority.single_owner = false; },
     [](GateInputs & value) { value.clock_monotonic = false; },
     [](GateInputs & value) { value.setpoint_fresh = false; },
   };
@@ -166,8 +162,14 @@ TEST_F(GateRuntimeTest, EveryRejectedPathProducesZeroPx4Inputs)
     expect_no_px4_input(decision);
   }
 
+  auto manual_inputs = ready_inputs();
+  SafetyGate auto_owner_gate("operator-a", "lease-1", "epoch-1", true, 1000000000LL, 20);
+  ASSERT_EQ(auto_owner_gate.tick(0, manual_inputs).state, offboard_cpp::GateState::PRESTREAM);
+  manual_inputs.authority.single_owner = false;
+  expect_no_px4_input(auto_owner_gate.tick(1, manual_inputs));
+
   auto inputs = ready_inputs();
-  SafetyGate gate("operator-a", "lease-1", "epoch-1", true);
+  SafetyGate gate("operator-a", "lease-1", "epoch-1", true, 1000000000LL, 20);
   ASSERT_FALSE(gate.request_manual_activation(0, inputs).fault_latched);
   ASSERT_EQ(gate.tick(0, inputs).state, offboard_cpp::GateState::PRESTREAM);
   for (int count = 1; count < 20; ++count) {

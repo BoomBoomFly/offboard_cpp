@@ -10,7 +10,7 @@
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
 #include <px4_msgs/msg/vehicle_command_ack.hpp>
 #include <px4_msgs/msg/vehicle_land_detected.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -66,6 +66,11 @@ private:
   std::string expected_owner_;
   std::string expected_lease_;
   std::string expected_epoch_;
+  const bool auto_arm_;
+  const bool require_armed_before_offboard_;
+  const bool fallback_hold_enabled_;
+  const std::int64_t prestream_ns_;
+  const std::uint32_t prestream_samples_;
   offboard_cpp::TimestampGate timestamp_gate_;
   bool timestamp_config_valid_{false};
   offboard_cpp::SafetyGate gate_;
@@ -107,7 +112,7 @@ private:
   bool last_activation_signal_{false};
 
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr odom_sub_;
   rclcpp::Subscription<px4_msgs::msg::TimesyncStatus>::SharedPtr timesync_sub_;
   rclcpp::Subscription<px4_msgs::msg::RcChannels>::SharedPtr rc_sub_;
   rclcpp::Subscription<px4_msgs::msg::TrajectorySetpoint>::SharedPtr setpoint_sub_;
@@ -122,6 +127,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr landing_confirmed_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr flight_state_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr fault_reason_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr readiness_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

@@ -108,7 +108,9 @@ public:
 
   explicit SafetyGate(
     std::string expected_owner, std::string expected_lease, std::string expected_epoch,
-    bool enable_arm = false);
+    bool auto_arm = false, std::int64_t prestream_ns = 2000000000LL,
+    std::uint32_t prestream_samples = 40,
+    bool require_armed_before_offboard = false);
 
   GateDecision tick(std::int64_t monotonic_ns, const GateInputs & inputs);
   // ACK has no request sequence in PX4.  Correlation is therefore the one
@@ -124,6 +126,7 @@ public:
   std::uint64_t pending_sequence() const { return pending_sequence_; }
 
 private:
+  bool stream_ready(const GateInputs & inputs) const;
   bool ready(const GateInputs & inputs) const;
   bool authority_matches(const Authority & authority) const;
   bool consume_request(const GateInputs & inputs, MissionRequest request);
@@ -136,7 +139,12 @@ private:
   std::string expected_owner_;
   std::string expected_lease_;
   std::string expected_epoch_;
-  bool enable_arm_{false};
+  bool auto_arm_{false};
+  // When enabled, PX4 must first report a manual RC arm before this gate
+  // emits any Offboard setpoint or mode command.
+  bool require_armed_before_offboard_{false};
+  std::int64_t prestream_ns_{2000000000LL};
+  std::uint32_t prestream_samples_required_{40};
   GateState state_{GateState::WAIT};
   std::int64_t last_tick_ns_{-1};
   std::int64_t prestream_started_ns_{-1};

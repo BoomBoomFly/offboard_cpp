@@ -40,7 +40,7 @@ GateInputs ready_inputs(std::uint64_t sequence = 7)
 
 SafetyGate gate(bool enable_arm = false)
 {
-  return SafetyGate("operator-a", "lease-1", "epoch-1", enable_arm);
+  return SafetyGate("operator-a", "lease-1", "epoch-1", enable_arm, 1000000000LL, 20);
 }
 
 void prestream_to_mode(SafetyGate & value, GateInputs & inputs)
@@ -102,6 +102,46 @@ void test_happy_path_disarmed()
   ++inputs.vehicle_status_generation;
   const auto active = value.tick(1120000000LL, inputs);
   assert(active.state == GateState::ACTIVE && active.publish_setpoint && active.publish_mode);
+}
+
+void test_prestream_accepts_an_already_active_offboard_mode()
+{
+  auto value = gate(false);
+  auto inputs = ready_inputs();
+  inputs.vehicle_in_offboard = true;
+  value.request_manual_activation(0, inputs);
+  assert(value.tick(0, inputs).state == GateState::PRESTREAM);
+  for (int i = 1; i < 20; ++i) {
+    assert(value.tick(i * 50000000LL, inputs).publish_setpoint);
+  }
+  const auto established = value.tick(1000000000LL, inputs);
+  assert(established.state == GateState::REQUEST_MODE);
+  assert(established.command == CommandKind::NONE);
+  assert(established.publish_setpoint && established.publish_mode);
+  const auto waiting = value.tick(1050000000LL, inputs);
+  assert(waiting.state == GateState::REQUEST_MODE);
+  assert(waiting.command == CommandKind::NONE);
+  assert(!waiting.fault_latched);
+}
+
+void test_manual_arm_starts_prestream_and_disarm_cancels_it()
+{
+  auto inputs = ready_inputs();
+  SafetyGate value("operator-a", "lease-1", "epoch-1", false, 1000000000LL, 20, true);
+  const auto waiting = value.tick(0, inputs);
+  assert(waiting.state == GateState::WAIT);
+  assert(!waiting.publish_setpoint && !waiting.publish_mode);
+
+  inputs.vehicle_armed = true;
+  const auto prestream = value.tick(1, inputs);
+  assert(prestream.state == GateState::PRESTREAM);
+  assert(prestream.publish_setpoint && prestream.publish_mode);
+
+  inputs.vehicle_armed = false;
+  const auto cancelled = value.tick(2, inputs);
+  assert(cancelled.state == GateState::WAIT);
+  assert(!cancelled.publish_setpoint && !cancelled.publish_mode);
+  assert(!cancelled.fault_latched);
 }
 
 void test_ack_reject_timeout_command_and_sequence_fail_closed()
@@ -241,10 +281,7 @@ void test_every_readiness_failure_and_restart_is_zero_output()
       result.command == CommandKind::NONE);
     inputs = ready_inputs();
   };
-  check([](GateInputs & value) { value.rc_fresh = false; });
   check([](GateInputs & value) { value.kill_latched = true; });
-  check([](GateInputs & value) { value.kill_fresh = false; });
-  check([](GateInputs & value) { value.vehicle_status_fresh = false; });
   check([](GateInputs & value) { value.odometry_fresh = false; });
   check([](GateInputs & value) { value.timesync_fresh = false; });
   check([](GateInputs & value) { value.mode_fresh = false; });
@@ -289,22 +326,17 @@ void test_arm_requires_explicit_enable_and_manual_gate()
     assert(disabled.tick(i * 50000000LL, inputs).publish_setpoint);
   }
   const auto standby = disabled.tick(1000000000LL, inputs);
-  assert(standby.state == GateState::STANDBY_DISARMED && standby.command == CommandKind::NONE &&
-    !standby.publish_setpoint && !standby.publish_mode);
+  assert(standby.state == GateState::REQUEST_MODE && standby.command == CommandKind::NONE &&
+    standby.publish_setpoint && standby.publish_mode);
 
   auto enabled = gate(true);
+  inputs.vehicle_in_offboard = false;
   prestream_to_mode(enabled, inputs);
   enabled.observe_ack(1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
+  inputs.vehicle_in_offboard = true;
   ++inputs.vehicle_status_generation;
-  const auto waiting_for_manual_arm = enabled.tick(1100000000LL, inputs);
-  assert(waiting_for_manual_arm.state == GateState::REQUEST_MODE &&
-    waiting_for_manual_arm.command == CommandKind::NONE);
-  inputs.manual_arm_enable = true;
-  auto armed = gate(true);
-  prestream_to_mode(armed, inputs);
-  armed.observe_ack(1050000000LL, accepted(SafetyGate::kVehicleCmdDoSetMode), inputs.authority);
-  ++inputs.vehicle_status_generation;
-  const auto arm = armed.tick(1100000000LL, inputs);
+  const auto arm = enabled.tick(1100000000LL, inputs);
+  auto & armed = enabled;
   assert(arm.state == GateState::REQUEST_ARM && arm.command == CommandKind::ARM);
   // Armed status that predates the arm ACK cannot complete the transaction.
   inputs.vehicle_armed = true;
@@ -351,6 +383,7 @@ void test_sixty_second_real_frequency_replay()
   TimestampGate timestamps(3000000, 100000);
   auto inputs = ready_inputs();
   SafetyGate safety("operator-a", "lease-1", "epoch-1", false);
+  inputs.vehicle_in_offboard = true;
   assert(!safety.request_manual_activation(0, inputs).fault_latched);
   const std::uint64_t base_us = 1000000;
   int next_timesync = 0;
@@ -466,6 +499,8 @@ void test_land_disarm_and_rearm_ack_lifecycle()
 int main()
 {
   test_happy_path_disarmed();
+  test_prestream_accepts_an_already_active_offboard_mode();
+  test_manual_arm_starts_prestream_and_disarm_cancels_it();
   test_ack_reject_timeout_command_and_sequence_fail_closed();
   test_each_ack_rejection_and_timeout();
   test_every_readiness_failure_and_restart_is_zero_output();

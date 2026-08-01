@@ -75,11 +75,11 @@ FlightOutput FlightSequence::tick(const FlightInputs & inputs)
   MissionRequest request = MissionRequest::NONE;
   switch (state_) {
     case MissionState::WAIT_START:
-      start_authorized_ = start_authorized_ || inputs.start;
+      start_authorized_ = start_authorized_ || inputs.start || config_.auto_takeoff;
       if (inputs.odometry_fresh) {
         command_ = inputs.position;
       }
-      if (start_authorized_ && inputs.armed && inputs.odometry_fresh &&
+      if (start_authorized_ && inputs.armed && inputs.vehicle_in_offboard && inputs.odometry_fresh &&
         inputs.vehicle_status_fresh) {
         home_ = inputs.position;
         command_ = inputs.position;

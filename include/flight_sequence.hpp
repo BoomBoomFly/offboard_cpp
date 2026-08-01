@@ -42,6 +42,7 @@ struct FlightConfig
   double home_land_speed{0.3};
   double platform_land_speed{0.2};
   double takeoff_height{1.0};
+  bool auto_takeoff{false};
   double hover_seconds{3.0};
   bool relative_takeoff_height{false};
   bool hold_after_takeoff{false};
@@ -61,6 +62,7 @@ struct FlightInputs
   bool odometry_fresh{false};
   bool vehicle_status_fresh{false};
   bool armed{false};
+  bool vehicle_in_offboard{false};
   bool landing_confirmed{false};
   std::array<double, 3> position{};
   bool car_target_fresh{false};

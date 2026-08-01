@@ -181,7 +181,7 @@ rc_debug:
 
   - `/fmu/out/vehicle_odometry` - 里程计数据
 
-  - `/fmu/out/vehicle_status_v1` - 飞控状态（PX4 v1.16.2）
+  - `/fmu/out/vehicle_status` - 飞控状态（PX4 v1.16.2）
 
   - `/fmu/out/rc_channels` - 遥控器通道
 

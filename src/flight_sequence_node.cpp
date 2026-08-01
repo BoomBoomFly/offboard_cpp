@@ -14,7 +14,7 @@
 #include <px4_msgs/msg/offboard_control_mode.hpp>
 #include <px4_msgs/msg/timesync_status.hpp>
 #include <px4_msgs/msg/trajectory_setpoint.hpp>
-#include <px4_msgs/msg/vehicle_odometry.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 #include <px4_msgs/msg/vehicle_status.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/bool.hpp>
@@ -45,8 +45,12 @@ public:
     mission_input_freshness_ns_(declare_parameter<std::int64_t>("freshness.mission_input_ns", 500000000LL)),
     sequence_(make_config())
   {
-    start_gate_ = std::make_unique<offboard_cpp::MissionStartGate>(
-      configured_task_id_, expected_start_epoch_, start_freshness_ns_);
+    if (expected_start_epoch_ != 0) {
+      start_gate_ = std::make_unique<offboard_cpp::MissionStartGate>(
+        configured_task_id_, expected_start_epoch_, start_freshness_ns_);
+    } else {
+      RCLCPP_WARN(get_logger(), "mission.expected_source_epoch=0: START input disabled; signal-only mode remains available");
+    }
     const auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
     command_pub_ = create_publisher<px4_msgs::msg::TrajectorySetpoint>("/offboard/cmd", qos);
     mode_pub_ = create_publisher<px4_msgs::msg::OffboardControlMode>("/offboard/cmd_mode", qos);
@@ -54,23 +58,22 @@ public:
     mission_state_pub_ =
       create_publisher<std_msgs::msg::String>(offboard_topics::kUavMissionState, 10);
 
-    odom_sub_ = create_subscription<px4_msgs::msg::VehicleOdometry>(
-      "/fmu/out/vehicle_odometry", qos,
-      [this](px4_msgs::msg::VehicleOdometry::SharedPtr message) {
-        const bool valid = std::all_of(
-          message->position.begin(), message->position.end(),
-          [](float value) {return std::isfinite(value);});
+    local_position_sub_ = create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+      "/fmu/out/vehicle_local_position", qos,
+      [this](px4_msgs::msg::VehicleLocalPosition::SharedPtr message) {
+        const bool valid = message->xy_valid && message->z_valid &&
+          std::isfinite(message->x) && std::isfinite(message->y) && std::isfinite(message->z);
         if (valid) {
-          for (std::size_t i = 0; i < position_.size(); ++i) {
-            position_[i] = message->position[i];
-          }
-          odom_received_ns_ = steady_now_ns();
+          position_ = {message->x, message->y, message->z};
+          local_position_received_ns_ = steady_now_ns();
         }
       });
     status_sub_ = create_subscription<px4_msgs::msg::VehicleStatus>(
-      "/fmu/out/vehicle_status_v1", qos,
+      offboard_topics::kVehicleStatus, qos,
       [this](px4_msgs::msg::VehicleStatus::SharedPtr message) {
         armed_ = message->arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
+        vehicle_in_offboard_ =
+          message->nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
         status_received_ns_ = steady_now_ns();
       });
     timesync_sub_ = create_subscription<px4_msgs::msg::TimesyncStatus>(
@@ -100,7 +103,7 @@ public:
         context.session_id = static_cast<std::uint32_t>((message->data >> 16U) & 0xffULL);
         context.sequence = static_cast<std::uint32_t>((message->data >> 24U) & 0xffULL);
         context.epoch = static_cast<std::uint32_t>(message->data >> 32U);
-        if (!start_gate_->observe_context(context, steady_now_ns())) {
+        if (!start_gate_ || !start_gate_->observe_context(context, steady_now_ns())) {
           RCLCPP_WARN(get_logger(), "Rejected stale or invalid START context");
         }
       });
@@ -108,7 +111,7 @@ public:
       offboard_topics::kMissionStart, qos,
       [this](std_msgs::msg::UInt32::SharedPtr message) {
         const bool running = sequence_.state() != offboard_cpp::MissionState::WAIT_START;
-        start_pending_ = start_gate_->accept(message->data, steady_now_ns(), running);
+        start_pending_ = start_gate_ && start_gate_->accept(message->data, steady_now_ns(), running);
         if (!start_pending_) {
           RCLCPP_WARN(get_logger(), "Rejected duplicate, stale or mismatched START task=%u", message->data);
         }
@@ -139,6 +142,7 @@ private:
     config.home_land_speed = declare_parameter<double>("mission.home_land_speed", 0.3);
     config.platform_land_speed = declare_parameter<double>("mission.platform_land_speed", 0.2);
     config.takeoff_height = declare_parameter<double>("mission.takeoff_height", 1.0);
+    config.auto_takeoff = declare_parameter<bool>("mission.auto_takeoff", false);
     config.hover_seconds = declare_parameter<double>("mission.hover_seconds", 3.0);
     config.relative_takeoff_height =
       declare_parameter<bool>("mission.relative_takeoff_height", false);
@@ -195,9 +199,10 @@ private:
     inputs.now_ns = now_ns;
     inputs.start = start_pending_;
     start_pending_ = false;
-    inputs.odometry_fresh = fresh(odom_received_ns_, now_ns, odometry_freshness_ns_);
+    inputs.odometry_fresh = fresh(local_position_received_ns_, now_ns, odometry_freshness_ns_);
     inputs.vehicle_status_fresh = fresh(status_received_ns_, now_ns, vehicle_status_freshness_ns_);
     inputs.armed = armed_;
+    inputs.vehicle_in_offboard = vehicle_in_offboard_;
     inputs.landing_confirmed = landing_confirmed_;
     inputs.position = position_;
     inputs.car_target_fresh = fresh(car_received_ns_, now_ns, mission_input_freshness_ns_);
@@ -233,6 +238,12 @@ private:
     px4_msgs::msg::OffboardControlMode mode;
     mode.timestamp = timestamp;
     mode.position = true;
+    mode.velocity = false;
+    mode.acceleration = false;
+    mode.attitude = false;
+    mode.body_rate = false;
+    mode.thrust_and_torque = false;
+    mode.direct_actuator = false;
     command_pub_->publish(setpoint);
     mode_pub_->publish(mode);
 
@@ -260,12 +271,13 @@ private:
   std::unique_ptr<offboard_cpp::MissionStartGate> start_gate_;
   std::array<double, 3> position_{};
   std::array<double, 3> car_target_{};
-  std::int64_t odom_received_ns_{-1};
+  std::int64_t local_position_received_ns_{-1};
   std::int64_t status_received_ns_{-1};
   std::int64_t timesync_received_ns_{-1};
   std::int64_t car_received_ns_{-1};
   std::uint64_t px4_time_us_{0};
   bool armed_{false};
+  bool vehicle_in_offboard_{false};
   bool start_pending_{false};
   bool follow_complete_{false};
   bool drop_complete_{false};
@@ -277,7 +289,7 @@ private:
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr mode_pub_;
   rclcpp::Publisher<std_msgs::msg::UInt8>::SharedPtr request_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mission_state_pub_;
-  rclcpp::Subscription<px4_msgs::msg::VehicleOdometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr local_position_sub_;
   rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub_;
   rclcpp::Subscription<px4_msgs::msg::TimesyncStatus>::SharedPtr timesync_sub_;
   rclcpp::Subscription<px4_msgs::msg::TrajectorySetpoint>::SharedPtr car_sub_;

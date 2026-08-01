@@ -2,28 +2,28 @@
 
 import uuid
 
+from ament_index_python.packages import get_package_share_directory
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    pkg_share = FindPackageShare('offboard_cpp').find('offboard_cpp')
-    default_param_file = PathJoinSubstitution([pkg_share, "config", "vertical_test.yaml"])
+    # Foxy can resolve a substitution default to an empty config_file when
+    # this launch is nested.  Resolve the package path while constructing the
+    # description so every node receives the reviewed vertical-test envelope.
+    default_param_file = get_package_share_directory('offboard_cpp') + '/config/vertical_test.yaml'
 
     launch_args = [
         DeclareLaunchArgument("use_sim_time", default_value="false"),
-        DeclareLaunchArgument(
-            "config_file", default_value=default_param_file,
-            description="Reviewed offboard config; vertical_test.yaml is the first-flight envelope"),
         DeclareLaunchArgument("task_id", default_value="3"),
         DeclareLaunchArgument(
-            "hover_height",
-            default_value="0.5",
-            description="Vertical-test hover height above the START position in metres"),
+            "takeoff_height",
+            default_value="1.0",
+            description="Vertical takeoff height above the valid local NED position in metres"),
         DeclareLaunchArgument(
             "relative_takeoff_height",
             default_value="true",
@@ -33,9 +33,19 @@ def generate_launch_description():
             default_value="true",
             description="Hold the vertical-test setpoint until operator takeover"),
         DeclareLaunchArgument(
-            'enable_arm',
+            'auto_arm',
             default_value='false',
-            description='Explicit arm/rearm permission; false is the production-safe default'),
+            description='Send one arm request after Offboard confirmation; false is the safe default'),
+        DeclareLaunchArgument(
+            'require_armed_before_offboard',
+            default_value='true',
+            description='Wait for a manual RC arm before sending the Offboard prestream'),
+        DeclareLaunchArgument(
+            'mission_auto_takeoff',
+            default_value='false',
+            description='Start the configured task after manual arm and confirmed Offboard'),
+        DeclareLaunchArgument('offboard_warmup_seconds', default_value='2.0',
+            description='Continuous Offboard signal duration before the mode request'),
         DeclareLaunchArgument('owner_id', default_value='flight-sequence'),
         DeclareLaunchArgument('lease_id', default_value=str(uuid.uuid4())),
         DeclareLaunchArgument("epoch", default_value=str(uuid.uuid4())),
@@ -52,11 +62,15 @@ def generate_launch_description():
         name='offboard_control_node',
         output='screen',
         parameters=[
-            LaunchConfiguration("config_file"),
+            default_param_file,
             {
                 'use_sim_time': common_time,
-                'takeoff_land.enable_arm': ParameterValue(
-                    LaunchConfiguration('enable_arm'), value_type=bool),
+                'auto_arm': ParameterValue(
+                    LaunchConfiguration('auto_arm'), value_type=bool),
+                'safety.require_armed_before_offboard': ParameterValue(
+                    LaunchConfiguration('require_armed_before_offboard'), value_type=bool),
+                'offboard_warmup_seconds': ParameterValue(
+                    LaunchConfiguration('offboard_warmup_seconds'), value_type=float),
                 'safety.expected_owner': LaunchConfiguration('owner_id'),
                 'safety.expected_lease': LaunchConfiguration('lease_id'),
                 'safety.expected_epoch': LaunchConfiguration('epoch'),
@@ -71,13 +85,15 @@ def generate_launch_description():
         name='flight_sequence_node',
         output='screen',
         parameters=[
-            LaunchConfiguration("config_file"),
+            default_param_file,
             {
                 'use_sim_time': common_time,
                 'mission.task_id': ParameterValue(
                     LaunchConfiguration('task_id'), value_type=int),
                 'mission.takeoff_height': ParameterValue(
-                    LaunchConfiguration('hover_height'), value_type=float),
+                    LaunchConfiguration('takeoff_height'), value_type=float),
+                'mission.auto_takeoff': ParameterValue(
+                    LaunchConfiguration('mission_auto_takeoff'), value_type=bool),
                 'mission.relative_takeoff_height': ParameterValue(
                     LaunchConfiguration('relative_takeoff_height'), value_type=bool),
                 'mission.hold_after_takeoff': ParameterValue(
@@ -94,7 +110,7 @@ def generate_launch_description():
         executable="rc_operator_adapter_node",
         name="rc_operator_adapter_node",
         output="screen",
-        parameters=[LaunchConfiguration("config_file"), {"use_sim_time": common_time}],
+        parameters=[default_param_file, {"use_sim_time": common_time}],
         emulate_tty=True,
     )
 
@@ -104,7 +120,7 @@ def generate_launch_description():
         name='offboard_authority_node',
         output='screen',
         parameters=[
-            LaunchConfiguration("config_file"),
+            default_param_file,
             {
                 'use_sim_time': common_time,
                 'authority.owner': LaunchConfiguration('owner_id'),
@@ -116,4 +132,5 @@ def generate_launch_description():
     )
 
     return LaunchDescription(
-        launch_args + [rc_operator_node, authority_node, flight_sequence_node, offboard_node])
+        launch_args + [
+            rc_operator_node, authority_node, flight_sequence_node, offboard_node])

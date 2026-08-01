@@ -4,7 +4,9 @@
 namespace offboard_topics
 {
 
-inline constexpr char kVehicleStatus[] = "fmu/out/vehicle_status_v1";
+// PX4 v1.16 exposes the versioned VehicleStatus interface on this deployed
+// uXRCE-DDS graph.  Keep all consumers on the one verified runtime endpoint.
+inline constexpr char kVehicleStatus[] = "/fmu/out/vehicle_status_v1";
 inline constexpr char kMissionStart[] = "/mission/start";
 inline constexpr char kMissionStartContext[] = "/mission/start/context";
 inline constexpr char kUavMissionState[] = "/uav/mission_state";

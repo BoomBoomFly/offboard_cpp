@@ -74,38 +74,51 @@ private:
 
   void publish()
   {
-    const auto now = steady_now_ns();
-    const bool writers =
-      endpoint_is("/fmu/in/trajectory_setpoint", "offboard_control_node") &&
-      endpoint_is("/fmu/in/offboard_control_mode", "offboard_control_node") &&
-      endpoint_is("/fmu/in/vehicle_command", "offboard_control_node");
-    const bool owners =
-      endpoint_is("/offboard/cmd", "flight_sequence_node") &&
-      endpoint_is("/offboard/cmd_mode", "flight_sequence_node") &&
-      endpoint_is("/offboard/command_request", "flight_sequence_node");
+    // Foxy invalidates the graph context as soon as SIGINT is handled.  A
+    // timer callback already in flight must not query or publish through it.
+    if (!rclcpp::ok()) {
+      return;
+    }
+    try {
+      const auto now = steady_now_ns();
+      const bool writers =
+        endpoint_is("/fmu/in/trajectory_setpoint", "offboard_control_node") &&
+        endpoint_is("/fmu/in/offboard_control_mode", "offboard_control_node") &&
+        endpoint_is("/fmu/in/vehicle_command", "offboard_control_node");
+      const bool owners =
+        endpoint_is("/offboard/cmd", "flight_sequence_node") &&
+        endpoint_is("/offboard/cmd_mode", "flight_sequence_node") &&
+        endpoint_is("/offboard/command_request", "flight_sequence_node");
 
-    std_msgs::msg::String authority;
-    std::ostringstream encoded;
-    encoded << "owner=" << owner_ << ";lease=" << lease_ << ";epoch=" << epoch_
-            << ";sequence=1;writers=" << (writers ? 1 : 0)
-            << ";owners=" << (owners ? 1 : 0);
-    authority.data = encoded.str();
-    authority_pub_->publish(authority);
+      std_msgs::msg::String authority;
+      std::ostringstream encoded;
+      encoded << "owner=" << owner_ << ";lease=" << lease_ << ";epoch=" << epoch_
+              << ";sequence=1;writers=" << (writers ? 1 : 0)
+              << ";owners=" << (owners ? 1 : 0);
+      authority.data = encoded.str();
+      authority_pub_->publish(authority);
 
-    std_msgs::msg::Bool value;
-    value.data = !fresh(kill_received_ns_, now) || kill_;
-    kill_pub_->publish(value);
-    value.data = fresh(activation_received_ns_, now) && activation_;
-    activation_pub_->publish(value);
-    value.data = fresh(arm_received_ns_, now) && arm_enable_;
-    arm_pub_->publish(value);
+      std_msgs::msg::Bool value;
+      value.data = fresh(kill_received_ns_, now) && kill_;
+      kill_pub_->publish(value);
+      value.data = fresh(activation_received_ns_, now) && activation_;
+      activation_pub_->publish(value);
+      value.data = fresh(arm_received_ns_, now) && arm_enable_;
+      arm_pub_->publish(value);
+    } catch (const rclcpp::exceptions::RCLError &) {
+      // Expected only during context teardown; all normal ROS errors retain
+      // their existing behavior before shutdown.
+      if (rclcpp::ok()) {
+        throw;
+      }
+    }
   }
 
   const std::string owner_;
   const std::string lease_;
   const std::string epoch_;
   const std::int64_t input_freshness_ns_;
-  bool kill_{true};
+  bool kill_{false};
   bool activation_{false};
   bool arm_enable_{false};
   std::int64_t kill_received_ns_{-1};

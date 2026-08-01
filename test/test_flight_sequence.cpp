@@ -18,6 +18,7 @@ FlightInputs base()
   inputs.odometry_fresh = true;
   inputs.vehicle_status_fresh = true;
   inputs.armed = true;
+  inputs.vehicle_in_offboard = true;
   return inputs;
 }
 
@@ -82,6 +83,19 @@ void test_start_is_latched_until_fresh_armed_status()
   inputs.start = false;
   assert(sequence.tick(inputs).state == MissionState::WAIT_START);
   inputs.armed = true;
+  assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
+}
+
+void test_auto_takeoff_waits_for_confirmed_offboard()
+{
+  FlightConfig config;
+  config.task = MissionTask::VERTICAL_TEST;
+  config.auto_takeoff = true;
+  FlightSequence sequence(config);
+  auto inputs = base();
+  inputs.vehicle_in_offboard = false;
+  assert(sequence.tick(inputs).state == MissionState::WAIT_START);
+  inputs.vehicle_in_offboard = true;
   assert(sequence.tick(inputs).state == MissionState::TAKEOFF);
 }
 
@@ -202,6 +216,7 @@ int main()
 {
   test_task1_normal_landing();
   test_start_is_latched_until_fresh_armed_status();
+  test_auto_takeoff_waits_for_confirmed_offboard();
   test_vertical_hover_holds_relative_to_start_position();
   test_vertical_test_can_auto_land_when_hold_is_disabled();
   test_task2_platform_land_rearm_and_home_land();
