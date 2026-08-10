@@ -1,0 +1,170 @@
+#include "offboard_cpp/px4_interface.hpp"
+
+#include <cmath>
+#include <chrono>
+#include <limits>
+
+#include <px4_msgs/msg/offboard_control_mode.hpp>
+#include <px4_msgs/msg/timesync_status.hpp>
+#include <px4_msgs/msg/trajectory_setpoint.hpp>
+#include <px4_msgs/msg/vehicle_command.hpp>
+#include <px4_msgs/msg/vehicle_command_ack.hpp>
+#include <px4_msgs/msg/vehicle_land_detected.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
+#include <px4_msgs/msg/vehicle_status.hpp>
+
+namespace offboard_cpp
+{
+namespace
+{
+constexpr std::int64_t kStatusMaxAgeUs = 1200000;
+constexpr std::int64_t kPositionMaxAgeUs = 250000;
+constexpr std::int64_t kLandMaxAgeUs = 1200000;
+constexpr std::int64_t kTimesyncMaxAgeUs = 2500000;
+
+bool fresh(std::int64_t received_us, std::int64_t now_us, std::int64_t max_age_us)
+{
+  return received_us >= 0 && now_us >= received_us && now_us - received_us < max_age_us;
+}
+
+std::int64_t steady_now_us()
+{
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+}  // namespace
+
+struct Px4Interface::Data
+{
+  rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr mode_pub;
+  rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr setpoint_pub;
+  rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr command_pub;
+  rclcpp::Subscription<px4_msgs::msg::VehicleStatus>::SharedPtr status_sub;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLocalPosition>::SharedPtr position_sub;
+  rclcpp::Subscription<px4_msgs::msg::VehicleLandDetected>::SharedPtr land_sub;
+  rclcpp::Subscription<px4_msgs::msg::VehicleCommandAck>::SharedPtr ack_sub;
+  rclcpp::Subscription<px4_msgs::msg::TimesyncStatus>::SharedPtr timesync_sub;
+  px4_msgs::msg::VehicleStatus status{};
+  px4_msgs::msg::VehicleLocalPosition position{};
+  bool landed{};
+  AckResult ack{AckResult::NONE};
+  std::uint64_t ack_sequence{};
+  std::int64_t status_received_us{-1};
+  std::int64_t position_received_us{-1};
+  std::int64_t land_received_us{-1};
+  std::int64_t timesync_received_us{-1};
+  std::uint64_t px4_timestamp_us{};
+};
+
+Px4Interface::~Px4Interface() = default;
+
+Px4Interface::Px4Interface(rclcpp::Node & node) : node_(node), data_(std::make_unique<Data>())
+{
+  const auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
+  data_->mode_pub = node_.create_publisher<px4_msgs::msg::OffboardControlMode>(
+    "/fmu/in/offboard_control_mode", qos);
+  data_->setpoint_pub = node_.create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+    "/fmu/in/trajectory_setpoint", qos);
+  data_->command_pub = node_.create_publisher<px4_msgs::msg::VehicleCommand>(
+    "/fmu/in/vehicle_command", qos);
+  data_->status_sub = node_.create_subscription<px4_msgs::msg::VehicleStatus>(
+    "/fmu/out/vehicle_status_v1", qos, [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr msg) {
+      data_->status = *msg;
+      data_->status_received_us = steady_now_us();
+    });
+  data_->position_sub = node_.create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+    "/fmu/out/vehicle_local_position", qos,
+    [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr msg) {
+      data_->position = *msg;
+      data_->position_received_us = steady_now_us();
+    });
+  data_->land_sub = node_.create_subscription<px4_msgs::msg::VehicleLandDetected>(
+    "/fmu/out/vehicle_land_detected", qos,
+    [this](px4_msgs::msg::VehicleLandDetected::ConstSharedPtr msg) {
+      data_->landed = msg->landed;
+      data_->land_received_us = steady_now_us();
+    });
+  data_->ack_sub = node_.create_subscription<px4_msgs::msg::VehicleCommandAck>(
+    "/fmu/out/vehicle_command_ack", qos,
+    [this](px4_msgs::msg::VehicleCommandAck::ConstSharedPtr msg) {
+      if (msg->command == px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE) {
+        data_->ack = msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED ?
+          AckResult::ACCEPTED : AckResult::REJECTED;
+        ++data_->ack_sequence;
+      }
+    });
+  data_->timesync_sub = node_.create_subscription<px4_msgs::msg::TimesyncStatus>(
+    "/fmu/out/timesync_status", qos, [this](px4_msgs::msg::TimesyncStatus::ConstSharedPtr msg) {
+      data_->px4_timestamp_us = msg->timestamp;
+      data_->timesync_received_us = steady_now_us();
+    });
+}
+
+MissionInputs Px4Interface::snapshot(std::int64_t steady_now_us) const
+{
+  MissionInputs inputs;
+  inputs.now_us = steady_now_us;
+  inputs.status_fresh = fresh(data_->status_received_us, steady_now_us, kStatusMaxAgeUs);
+  inputs.local_position_fresh = fresh(data_->position_received_us, steady_now_us, kPositionMaxAgeUs);
+  inputs.local_position_healthy = data_->position.xy_valid && data_->position.z_valid &&
+    std::isfinite(data_->position.x) && std::isfinite(data_->position.y) &&
+    std::isfinite(data_->position.z) && std::isfinite(data_->position.vx) &&
+    std::isfinite(data_->position.vy) && std::isfinite(data_->position.vz);
+  inputs.armed = data_->status.arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
+  inputs.offboard = data_->status.nav_state ==
+    px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
+  inputs.failsafe = data_->status.failsafe || data_->status.failsafe_and_user_took_over;
+  inputs.landed = fresh(data_->land_received_us, steady_now_us, kLandMaxAgeUs) && data_->landed;
+  inputs.latest_arming_reason = data_->status.latest_arming_reason;
+  inputs.position_ned = {data_->position.x, data_->position.y, data_->position.z};
+  inputs.velocity_ned = {data_->position.vx, data_->position.vy, data_->position.vz};
+  inputs.heading_rad = data_->position.heading;
+  inputs.reset = {data_->position.xy_reset_counter, data_->position.z_reset_counter,
+    data_->position.heading_reset_counter, data_->position.delta_xy[0],
+    data_->position.delta_xy[1], data_->position.delta_z, data_->position.delta_heading};
+  inputs.ack_sequence = data_->ack_sequence;
+  inputs.offboard_ack = data_->ack;
+  return inputs;
+}
+
+void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_now_us)
+{
+  if (!fresh(data_->timesync_received_us, steady_now_us, kTimesyncMaxAgeUs)) { return; }
+  const auto timestamp = data_->px4_timestamp_us +
+    static_cast<std::uint64_t>(steady_now_us - data_->timesync_received_us);
+  if (actions.publish_setpoint) {
+    const auto nan = std::numeric_limits<float>::quiet_NaN();
+    px4_msgs::msg::OffboardControlMode mode{};
+    mode.timestamp = timestamp;
+    mode.position = true;
+    px4_msgs::msg::TrajectorySetpoint setpoint{};
+    setpoint.timestamp = timestamp;
+    setpoint.position = {static_cast<float>(actions.position_ned[0]),
+      static_cast<float>(actions.position_ned[1]), static_cast<float>(actions.position_ned[2])};
+    setpoint.velocity = {nan, nan, nan};
+    setpoint.acceleration = {nan, nan, nan};
+    setpoint.jerk = {nan, nan, nan};
+    setpoint.yaw = static_cast<float>(actions.yaw_rad);
+    setpoint.yawspeed = nan;
+    data_->mode_pub->publish(mode);
+    data_->setpoint_pub->publish(setpoint);
+  }
+  if (actions.request_offboard || actions.request_land) {
+    px4_msgs::msg::VehicleCommand command{};
+    command.timestamp = timestamp;
+    command.target_system = 1;
+    command.target_component = 1;
+    command.source_system = 1;
+    command.source_component = 1;
+    command.from_external = true;
+    if (actions.request_offboard) {
+      command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
+      command.param1 = 1.0F;
+      command.param2 = 6.0F;
+    } else {
+      command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_NAV_LAND;
+    }
+    data_->command_pub->publish(command);
+  }
+}
+}  // namespace offboard_cpp

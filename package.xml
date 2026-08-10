@@ -1,38 +1,16 @@
 <?xml version="1.0"?>
-<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>offboard_cpp</name>
-  <version>0.0.2</version>
-  <description>ROS2 PX4 Offboard control node in C++ with px4_msgs and MicroXRCEDDS</description>
-
+  <version>0.1.0</version>
+  <description>Minimal direct uXRCE-DDS PX4 Offboard mission.</description>
   <maintainer email="863237849@qq.com">orangepi</maintainer>
   <license>MIT</license>
-
-  <!-- Build tools -->
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>rosidl_default_generators</buildtool_depend>
-
-  <member_of_group>rosidl_interface_packages</member_of_group>
-
-  <!-- Dependencies -->
-  <depend>action_msgs</depend>
   <depend>rclcpp</depend>
-  <depend>rcl_interfaces</depend>
-  <depend>std_msgs</depend>
   <depend>px4_msgs</depend>
-  <depend>tf2</depend>
-  <depend>tf2_ros</depend>
-  <depend>tf2_geometry_msgs</depend>
-  <depend>opencv</depend>
-  <depend>eigen</depend>
-  <depend>eigen3_cmake_module</depend>
-
-  <!-- Test dependencies -->
+  <depend>boomboom_common</depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
-  <test_depend>ament_lint_auto</test_depend>
-  <test_depend>ament_lint_common</test_depend>
-
-  <export>
-    <build_type>ament_cmake</build_type>
-  </export>
+  <export><build_type>ament_cmake</build_type></export>
 </package>

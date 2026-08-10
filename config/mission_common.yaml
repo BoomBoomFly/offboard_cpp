@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    mission.takeoff_height_m: 1.5
+    mission.hover_duration_s: 60.0
+    mission.prestream_duration_s: 1.0
+    mission.offboard_ack_timeout_s: 2.0
+    mission.offboard_state_timeout_s: 2.0
+    mission.position_tolerance_m: 0.20
+    mission.velocity_tolerance_mps: 0.15
+    mission.stable_duration_s: 1.0
