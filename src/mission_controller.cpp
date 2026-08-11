@@ -173,11 +173,17 @@ MissionActions MissionController::tick(const MissionInputs & inputs)
       break;
     case MissionState::HOVER:
       actions = setpoint();
-      if (inputs.now_us - entered_at_us_ >=
+      if (inputs.cancel_requested) {
+        target_[0] = home_[0];
+        target_[1] = home_[1];
+        enter(MissionState::RETURN_LOCAL, inputs.now_us, BOOMBOOM_STATE_REASON_CANCELLED);
+        actions = setpoint();
+      } else if (inputs.now_us - entered_at_us_ >=
         static_cast<std::int64_t>(config_.hover_duration_s * kUsPerSecond)) {
         target_[0] = home_[0];
         target_[1] = home_[1];
         enter(MissionState::RETURN_LOCAL, inputs.now_us, BOOMBOOM_STATE_REASON_HOVER_COMPLETE);
+        actions = setpoint();
       }
       break;
     case MissionState::RETURN_LOCAL:
@@ -188,10 +194,13 @@ MissionActions MissionController::tick(const MissionInputs & inputs)
       break;
     case MissionState::LAND_REQUEST:
       actions.request_land = true;
+      land_request_sequence_ = inputs.landed_sequence;
       enter(MissionState::WAIT_LANDED, inputs.now_us);
       break;
     case MissionState::WAIT_LANDED:
-      if (inputs.landed) { enter(MissionState::COMPLETE, inputs.now_us, BOOMBOOM_STATE_REASON_LANDED); }
+      if (inputs.landed_sequence > land_request_sequence_ && inputs.landed) {
+        enter(MissionState::COMPLETE, inputs.now_us, BOOMBOOM_STATE_REASON_LANDED);
+      }
       break;
     case MissionState::COMPLETE:
       if (inputs.status_fresh && !inputs.armed) { enter(MissionState::WAIT_DISARMED, inputs.now_us); }

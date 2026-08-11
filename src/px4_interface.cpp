@@ -47,6 +47,7 @@ struct Px4Interface::Data
   px4_msgs::msg::VehicleStatus status{};
   px4_msgs::msg::VehicleLocalPosition position{};
   bool landed{};
+  std::uint64_t landed_sequence{};
   AckResult ack{AckResult::NONE};
   std::uint64_t ack_sequence{};
   std::int64_t status_received_us{-1};
@@ -82,6 +83,7 @@ Px4Interface::Px4Interface(rclcpp::Node & node) : node_(node), data_(std::make_u
     "/fmu/out/vehicle_land_detected", qos,
     [this](px4_msgs::msg::VehicleLandDetected::ConstSharedPtr msg) {
       data_->landed = msg->landed;
+      ++data_->landed_sequence;
       data_->land_received_us = steady_now_us();
     });
   data_->ack_sub = node_.create_subscription<px4_msgs::msg::VehicleCommandAck>(
@@ -115,6 +117,7 @@ MissionInputs Px4Interface::snapshot(std::int64_t steady_now_us) const
     px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
   inputs.failsafe = data_->status.failsafe || data_->status.failsafe_and_user_took_over;
   inputs.landed = fresh(data_->land_received_us, steady_now_us, kLandMaxAgeUs) && data_->landed;
+  inputs.landed_sequence = data_->landed_sequence;
   inputs.latest_arming_reason = data_->status.latest_arming_reason;
   inputs.position_ned = {data_->position.x, data_->position.y, data_->position.z};
   inputs.velocity_ned = {data_->position.vx, data_->position.vy, data_->position.vz};

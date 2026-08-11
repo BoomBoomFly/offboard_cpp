@@ -43,7 +43,9 @@ struct MissionInputs {
   bool armed{};
   bool offboard{};
   bool failsafe{};
+  bool cancel_requested{};
   bool landed{};
+  std::uint64_t landed_sequence{};
   std::uint8_t latest_arming_reason{};
   std::array<double, 3> position_ned{};
   std::array<double, 3> velocity_ned{};

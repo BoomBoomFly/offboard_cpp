@@ -10,6 +10,7 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(px4_msgs REQUIRED)
 find_package(boomboom_common REQUIRED)
 
@@ -34,7 +35,7 @@ target_link_libraries(offboard_mission_node_lib
   px4_interface
   boomboom_common::boomboom_common_ros2
 )
-ament_target_dependencies(offboard_mission_node_lib rclcpp px4_msgs boomboom_common)
+ament_target_dependencies(offboard_mission_node_lib rclcpp std_srvs px4_msgs boomboom_common)
 
 add_executable(offboard_mission_node src/main.cpp)
 target_link_libraries(offboard_mission_node offboard_mission_node_lib)

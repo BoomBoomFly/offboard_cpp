@@ -48,6 +48,20 @@ OffboardMissionNode::OffboardMissionNode() : Node("offboard_mission_node")
   state_pub_ = create_publisher<boomboom_common::msg::State>("/boomboom/mission/state", 10);
   faults_pub_ = create_publisher<boomboom_common::msg::Faults>("/boomboom/mission/faults", 10);
   event_pub_ = create_publisher<boomboom_common::msg::Event>("/boomboom/mission/event", 10);
+  cancel_service_ = create_service<std_srvs::srv::Trigger>(
+    "/offboard/cancel_mission",
+    [this](
+      const std::shared_ptr<std_srvs::srv::Trigger::Request>,
+      std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
+      if (controller_->state() != MissionState::HOVER) {
+        response->success = false;
+        response->message = "mission cancellation is only available while hovering";
+        return;
+      }
+      cancel_requested_ = true;
+      response->success = true;
+      response->message = "mission cancellation accepted: returning to local home";
+    });
   timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() { on_timer(); });
 }
 
@@ -57,7 +71,10 @@ void OffboardMissionNode::on_timer()
 {
   const auto steady_now_us = std::chrono::duration_cast<std::chrono::microseconds>(
     std::chrono::steady_clock::now().time_since_epoch()).count();
-  const auto actions = controller_->tick(px4_->snapshot(steady_now_us));
+  auto inputs = px4_->snapshot(steady_now_us);
+  inputs.cancel_requested = cancel_requested_;
+  cancel_requested_ = false;
+  const auto actions = controller_->tick(inputs);
   const auto state = static_cast<int>(controller_->state());
   if (state != last_state_) {
     RCLCPP_INFO(get_logger(), "mission state: %s", mission_state_name(controller_->state()));

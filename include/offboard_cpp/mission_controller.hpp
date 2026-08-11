@@ -36,6 +36,7 @@ private:
   bool have_reset_{};
   PositionReset reset_{};
   std::uint64_t request_ack_sequence_{};
+  std::uint64_t land_request_sequence_{};
   bool offboard_ack_accepted_{};
   std::array<double, 3> home_{};
   std::array<double, 3> target_{};

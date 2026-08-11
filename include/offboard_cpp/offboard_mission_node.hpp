@@ -3,6 +3,7 @@
 #include <memory>
 
 #include <rclcpp/rclcpp.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include <boomboom_common/msg/event.hpp>
 #include <boomboom_common/msg/faults.hpp>
@@ -29,6 +30,8 @@ private:
   rclcpp::Publisher<boomboom_common::msg::State>::SharedPtr state_pub_;
   rclcpp::Publisher<boomboom_common::msg::Faults>::SharedPtr faults_pub_;
   rclcpp::Publisher<boomboom_common::msg::Event>::SharedPtr event_pub_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_service_;
+  bool cancel_requested_{};
   std::uint64_t event_sequence_{};
   int last_state_{-1};
 };
