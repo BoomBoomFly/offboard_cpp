@@ -1,6 +1,4 @@
-#include "offboard_cpp/mission_controller.hpp"
-
-#include <cmath>
+#include "offboard_cpp/mission_executor.hpp"
 
 namespace offboard_cpp
 {
@@ -11,22 +9,49 @@ constexpr std::uint8_t kRcSwitch = 2;
 constexpr std::int64_t kUsPerSecond = 1000000;
 }
 
-MissionController::MissionController(MissionConfig config) : config_(config) {}
+MissionExecutor::MissionExecutor(MissionConfig config)
+: config_(config),
+  takeoff_mode_(
+    config.position_tolerance_m, config.velocity_tolerance_mps, config.stable_duration_s),
+  hover_mode_(config.hover_duration_s),
+  return_mode_(
+    config.position_tolerance_m, config.velocity_tolerance_mps, config.stable_duration_s)
+{}
 
-void MissionController::enter(MissionState state, std::int64_t now_us, std::uint16_t reason)
+ModeBase * MissionExecutor::mode_for_state(MissionState state)
 {
+  switch (state) {
+    case MissionState::TAKEOFF:
+      return &takeoff_mode_;
+    case MissionState::HOVER:
+      return &hover_mode_;
+    case MissionState::RETURN_LOCAL:
+      return &return_mode_;
+    default:
+      return nullptr;
+  }
+}
+
+void MissionExecutor::enter(MissionState state, std::int64_t now_us, std::uint16_t reason)
+{
+  ModeBase * next_mode = mode_for_state(state);
+  if (next_mode != active_mode_) {
+    active_mode_ = next_mode;
+    if (active_mode_ != nullptr) {
+      active_mode_->on_activate(now_us);
+    }
+  }
   state_ = state;
   entered_at_us_ = now_us;
   state_reason_ = reason;
-  stable_since_us_ = -1;
 }
 
-bool MissionController::source_is_rc(std::uint8_t reason) const
+bool MissionExecutor::source_is_rc(std::uint8_t reason) const
 {
   return reason == kStickGesture || reason == kRcSwitch;
 }
 
-void MissionController::apply_reset(const PositionReset & reset)
+void MissionExecutor::apply_reset(const PositionReset & reset)
 {
   if (!have_reset_) {
     reset_ = reset;
@@ -52,30 +77,17 @@ void MissionController::apply_reset(const PositionReset & reset)
   reset_ = reset;
 }
 
-bool MissionController::position_stable(
-  const MissionInputs & inputs, const std::array<double, 3> & target) const
+PositionTarget MissionExecutor::target() const
 {
-  const double dx = inputs.position_ned[0] - target[0];
-  const double dy = inputs.position_ned[1] - target[1];
-  const double dz = inputs.position_ned[2] - target[2];
-  const double speed = std::sqrt(
-    inputs.velocity_ned[0] * inputs.velocity_ned[0] +
-    inputs.velocity_ned[1] * inputs.velocity_ned[1] +
-    inputs.velocity_ned[2] * inputs.velocity_ned[2]);
-  return std::sqrt(dx * dx + dy * dy + dz * dz) <= config_.position_tolerance_m &&
-         speed <= config_.velocity_tolerance_mps;
+  return PositionTarget{target_, yaw_};
 }
 
-MissionActions MissionController::setpoint() const
+ModeUpdate MissionExecutor::update_mode(const MissionInputs & inputs)
 {
-  MissionActions actions;
-  actions.publish_setpoint = true;
-  actions.position_ned = target_;
-  actions.yaw_rad = yaw_;
-  return actions;
+  return active_mode_->update_setpoint(inputs, target());
 }
 
-MissionActions MissionController::tick(const MissionInputs & inputs)
+MissionActions MissionExecutor::tick(const MissionInputs & inputs)
 {
   const bool arm_rising_edge = inputs.armed && !previous_armed_;
   previous_armed_ = inputs.armed;
@@ -115,7 +127,9 @@ MissionActions MissionController::tick(const MissionInputs & inputs)
       break;
     case MissionState::WAIT_LOCALIZATION:
       if (!inputs.armed && inputs.status_fresh && inputs.local_position_fresh &&
-          inputs.local_position_healthy) { enter(MissionState::READY, inputs.now_us, BOOMBOOM_STATE_REASON_EKF_READY); }
+          inputs.local_position_healthy) {
+        enter(MissionState::READY, inputs.now_us, BOOMBOOM_STATE_REASON_EKF_READY);
+      }
       break;
     case MissionState::READY:
       if (!inputs.status_fresh || !inputs.local_position_fresh || !inputs.local_position_healthy) {
@@ -129,23 +143,24 @@ MissionActions MissionController::tick(const MissionInputs & inputs)
       }
       break;
     case MissionState::OFFBOARD_PRESTREAM:
-      actions = setpoint();
+      actions = make_position_setpoint(target());
       if (!inputs.armed) {
         enter(MissionState::WAIT_DISARMED, inputs.now_us);
       } else if (inputs.now_us - entered_at_us_ >=
         static_cast<std::int64_t>(config_.prestream_duration_s * kUsPerSecond)) {
         request_ack_sequence_ = inputs.ack_sequence;
         offboard_ack_accepted_ = false;
+        offboard_ack_accepted_at_us_ = 0;
         enter(MissionState::REQUEST_OFFBOARD, inputs.now_us, BOOMBOOM_STATE_REASON_PRESTREAM_READY);
-        actions = setpoint();
         actions.request_offboard = true;
       }
       break;
     case MissionState::REQUEST_OFFBOARD:
-      actions = setpoint();
+      actions = make_position_setpoint(target());
       if (inputs.ack_sequence > request_ack_sequence_) {
-        if (inputs.offboard_ack == AckResult::ACCEPTED) {
+        if (inputs.offboard_ack == AckResult::ACCEPTED && !offboard_ack_accepted_) {
           offboard_ack_accepted_ = true;
+          offboard_ack_accepted_at_us_ = inputs.now_us;
         } else if (inputs.offboard_ack == AckResult::REJECTED) {
           faults_ |= BOOMBOOM_FAULT_COMMAND_REJECTED;
           enter(MissionState::COMPLETE, inputs.now_us, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
@@ -154,44 +169,46 @@ MissionActions MissionController::tick(const MissionInputs & inputs)
       }
       if (offboard_ack_accepted_ && inputs.offboard) {
         enter(MissionState::TAKEOFF, inputs.now_us, BOOMBOOM_STATE_REASON_OFFBOARD_ACCEPTED);
-      } else if (inputs.now_us - entered_at_us_ >= static_cast<std::int64_t>(
-          (offboard_ack_accepted_ ? config_.offboard_state_timeout_s :
+      } else if (inputs.now_us - (offboard_ack_accepted_ ? offboard_ack_accepted_at_us_ : entered_at_us_) >=
+          static_cast<std::int64_t>((offboard_ack_accepted_ ? config_.offboard_state_timeout_s :
           config_.offboard_ack_timeout_s) * kUsPerSecond)) {
         faults_ |= BOOMBOOM_FAULT_COMMAND_REJECTED;
         enter(MissionState::COMPLETE, inputs.now_us, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
       }
       break;
-    case MissionState::TAKEOFF:
-      actions = setpoint();
-      if (position_stable(inputs, target_)) {
-        if (stable_since_us_ < 0) { stable_since_us_ = inputs.now_us; }
-        if (inputs.now_us - stable_since_us_ >=
-          static_cast<std::int64_t>(config_.stable_duration_s * kUsPerSecond)) {
-          enter(MissionState::HOVER, inputs.now_us, BOOMBOOM_STATE_REASON_TARGET_REACHED);
-        }
-      } else { stable_since_us_ = -1; }
+    case MissionState::TAKEOFF: {
+      const auto update = update_mode(inputs);
+      actions = update.actions;
+      if (update.result == ModeResult::SUCCEEDED) {
+        enter(MissionState::HOVER, inputs.now_us, BOOMBOOM_STATE_REASON_TARGET_REACHED);
+      }
       break;
+    }
     case MissionState::HOVER:
-      actions = setpoint();
       if (inputs.cancel_requested) {
         target_[0] = home_[0];
         target_[1] = home_[1];
         enter(MissionState::RETURN_LOCAL, inputs.now_us, BOOMBOOM_STATE_REASON_CANCELLED);
-        actions = setpoint();
-      } else if (inputs.now_us - entered_at_us_ >=
-        static_cast<std::int64_t>(config_.hover_duration_s * kUsPerSecond)) {
-        target_[0] = home_[0];
-        target_[1] = home_[1];
-        enter(MissionState::RETURN_LOCAL, inputs.now_us, BOOMBOOM_STATE_REASON_HOVER_COMPLETE);
-        actions = setpoint();
+        actions = update_mode(inputs).actions;
+      } else {
+        const auto update = update_mode(inputs);
+        actions = update.actions;
+        if (update.result == ModeResult::SUCCEEDED) {
+          target_[0] = home_[0];
+          target_[1] = home_[1];
+          enter(MissionState::RETURN_LOCAL, inputs.now_us, BOOMBOOM_STATE_REASON_HOVER_COMPLETE);
+          actions = update_mode(inputs).actions;
+        }
       }
       break;
-    case MissionState::RETURN_LOCAL:
-      actions = setpoint();
-      if (position_stable(inputs, target_)) {
+    case MissionState::RETURN_LOCAL: {
+      const auto update = update_mode(inputs);
+      actions = update.actions;
+      if (update.result == ModeResult::SUCCEEDED) {
         enter(MissionState::LAND_REQUEST, inputs.now_us, BOOMBOOM_STATE_REASON_TARGET_REACHED);
       }
       break;
+    }
     case MissionState::LAND_REQUEST:
       actions.request_land = true;
       land_request_sequence_ = inputs.landed_sequence;
@@ -203,7 +220,9 @@ MissionActions MissionController::tick(const MissionInputs & inputs)
       }
       break;
     case MissionState::COMPLETE:
-      if (inputs.status_fresh && !inputs.armed) { enter(MissionState::WAIT_DISARMED, inputs.now_us); }
+      if (inputs.status_fresh && !inputs.armed) {
+        enter(MissionState::WAIT_DISARMED, inputs.now_us);
+      }
       break;
   }
   return actions;
@@ -227,4 +246,5 @@ const char * mission_state_name(MissionState state)
   }
   return "UNKNOWN";
 }
+
 }  // namespace offboard_cpp

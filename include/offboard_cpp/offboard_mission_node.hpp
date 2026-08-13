@@ -12,7 +12,7 @@
 
 namespace offboard_cpp
 {
-class MissionController;
+class MissionExecutor;
 class Px4Interface;
 
 class OffboardMissionNode : public rclcpp::Node
@@ -23,7 +23,7 @@ public:
 
 private:
   void on_timer();
-  std::unique_ptr<MissionController> controller_;
+  std::unique_ptr<MissionExecutor> executor_;
   std::unique_ptr<Px4Interface> px4_;
   rclcpp::TimerBase::SharedPtr timer_;
   rclcpp::Publisher<boomboom_common::msg::Status>::SharedPtr status_pub_;

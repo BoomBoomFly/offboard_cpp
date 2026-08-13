@@ -15,6 +15,26 @@
 
 namespace offboard_cpp
 {
+namespace detail
+{
+bool is_mission_offboard_ack(const px4_msgs::msg::VehicleCommandAck & ack)
+{
+  // PX4 copies VehicleCommand.source_* into VehicleCommandAck.target_*.
+  return ack.command == px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE &&
+         ack.target_system == kMissionSourceSystem &&
+         ack.target_component == kMissionSourceComponent;
+}
+
+bool is_local_position_healthy(const px4_msgs::msg::VehicleLocalPosition & position)
+{
+  return position.xy_valid && position.z_valid && position.heading_good_for_control &&
+         std::isfinite(position.x) && std::isfinite(position.y) &&
+         std::isfinite(position.z) && std::isfinite(position.vx) &&
+         std::isfinite(position.vy) && std::isfinite(position.vz) &&
+         std::isfinite(position.heading);
+}
+}  // namespace detail
+
 namespace
 {
 constexpr std::int64_t kStatusMaxAgeUs = 1200000;
@@ -59,43 +79,43 @@ struct Px4Interface::Data
 
 Px4Interface::~Px4Interface() = default;
 
-Px4Interface::Px4Interface(rclcpp::Node & node) : node_(node), data_(std::make_unique<Data>())
+Px4Interface::Px4Interface(rclcpp::Node & node) : data_(std::make_unique<Data>())
 {
   const auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
-  data_->mode_pub = node_.create_publisher<px4_msgs::msg::OffboardControlMode>(
+  data_->mode_pub = node.create_publisher<px4_msgs::msg::OffboardControlMode>(
     "/fmu/in/offboard_control_mode", qos);
-  data_->setpoint_pub = node_.create_publisher<px4_msgs::msg::TrajectorySetpoint>(
+  data_->setpoint_pub = node.create_publisher<px4_msgs::msg::TrajectorySetpoint>(
     "/fmu/in/trajectory_setpoint", qos);
-  data_->command_pub = node_.create_publisher<px4_msgs::msg::VehicleCommand>(
+  data_->command_pub = node.create_publisher<px4_msgs::msg::VehicleCommand>(
     "/fmu/in/vehicle_command", qos);
-  data_->status_sub = node_.create_subscription<px4_msgs::msg::VehicleStatus>(
+  data_->status_sub = node.create_subscription<px4_msgs::msg::VehicleStatus>(
     "/fmu/out/vehicle_status_v1", qos, [this](px4_msgs::msg::VehicleStatus::ConstSharedPtr msg) {
       data_->status = *msg;
       data_->status_received_us = steady_now_us();
     });
-  data_->position_sub = node_.create_subscription<px4_msgs::msg::VehicleLocalPosition>(
+  data_->position_sub = node.create_subscription<px4_msgs::msg::VehicleLocalPosition>(
     "/fmu/out/vehicle_local_position", qos,
     [this](px4_msgs::msg::VehicleLocalPosition::ConstSharedPtr msg) {
       data_->position = *msg;
       data_->position_received_us = steady_now_us();
     });
-  data_->land_sub = node_.create_subscription<px4_msgs::msg::VehicleLandDetected>(
+  data_->land_sub = node.create_subscription<px4_msgs::msg::VehicleLandDetected>(
     "/fmu/out/vehicle_land_detected", qos,
     [this](px4_msgs::msg::VehicleLandDetected::ConstSharedPtr msg) {
       data_->landed = msg->landed;
       ++data_->landed_sequence;
       data_->land_received_us = steady_now_us();
     });
-  data_->ack_sub = node_.create_subscription<px4_msgs::msg::VehicleCommandAck>(
+  data_->ack_sub = node.create_subscription<px4_msgs::msg::VehicleCommandAck>(
     "/fmu/out/vehicle_command_ack", qos,
     [this](px4_msgs::msg::VehicleCommandAck::ConstSharedPtr msg) {
-      if (msg->command == px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE) {
+      if (detail::is_mission_offboard_ack(*msg)) {
         data_->ack = msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED ?
           AckResult::ACCEPTED : AckResult::REJECTED;
         ++data_->ack_sequence;
       }
     });
-  data_->timesync_sub = node_.create_subscription<px4_msgs::msg::TimesyncStatus>(
+  data_->timesync_sub = node.create_subscription<px4_msgs::msg::TimesyncStatus>(
     "/fmu/out/timesync_status", qos, [this](px4_msgs::msg::TimesyncStatus::ConstSharedPtr msg) {
       data_->px4_timestamp_us = msg->timestamp;
       data_->timesync_received_us = steady_now_us();
@@ -108,10 +128,7 @@ MissionInputs Px4Interface::snapshot(std::int64_t steady_now_us) const
   inputs.now_us = steady_now_us;
   inputs.status_fresh = fresh(data_->status_received_us, steady_now_us, kStatusMaxAgeUs);
   inputs.local_position_fresh = fresh(data_->position_received_us, steady_now_us, kPositionMaxAgeUs);
-  inputs.local_position_healthy = data_->position.xy_valid && data_->position.z_valid &&
-    std::isfinite(data_->position.x) && std::isfinite(data_->position.y) &&
-    std::isfinite(data_->position.z) && std::isfinite(data_->position.vx) &&
-    std::isfinite(data_->position.vy) && std::isfinite(data_->position.vz);
+  inputs.local_position_healthy = detail::is_local_position_healthy(data_->position);
   inputs.armed = data_->status.arming_state == px4_msgs::msg::VehicleStatus::ARMING_STATE_ARMED;
   inputs.offboard = data_->status.nav_state ==
     px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_OFFBOARD;
@@ -155,10 +172,10 @@ void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_n
   if (actions.request_offboard || actions.request_land) {
     px4_msgs::msg::VehicleCommand command{};
     command.timestamp = timestamp;
-    command.target_system = 1;
-    command.target_component = 1;
-    command.source_system = 1;
-    command.source_component = 1;
+    command.target_system = detail::kPx4TargetSystem;
+    command.target_component = detail::kPx4TargetComponent;
+    command.source_system = detail::kMissionSourceSystem;
+    command.source_component = detail::kMissionSourceComponent;
     command.from_external = true;
     if (actions.request_offboard) {
       command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
