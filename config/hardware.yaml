@@ -1,5 +1,0 @@
-/**:
-  ros__parameters:
-    mission.takeoff_height_m: 1.5
-    mission.hover_duration_s: 60.0
-    mission.prestream_duration_s: 1.0

@@ -2,7 +2,7 @@
 
 #include <chrono>
 
-#include "offboard_cpp/mission_controller.hpp"
+#include "offboard_cpp/mission_executor.hpp"
 #include "offboard_cpp/px4_interface.hpp"
 
 #include <boomboom_common_ros2/conversions.hpp>
@@ -42,7 +42,7 @@ OffboardMissionNode::OffboardMissionNode() : Node("offboard_mission_node")
   config.position_tolerance_m = declare_parameter<double>("mission.position_tolerance_m", 0.20);
   config.velocity_tolerance_mps = declare_parameter<double>("mission.velocity_tolerance_mps", 0.15);
   config.stable_duration_s = declare_parameter<double>("mission.stable_duration_s", 1.0);
-  controller_ = std::make_unique<MissionController>(config);
+  executor_ = std::make_unique<MissionExecutor>(config);
   px4_ = std::make_unique<Px4Interface>(*this);
   status_pub_ = create_publisher<boomboom_common::msg::Status>("/boomboom/mission/status", 10);
   state_pub_ = create_publisher<boomboom_common::msg::State>("/boomboom/mission/state", 10);
@@ -53,7 +53,7 @@ OffboardMissionNode::OffboardMissionNode() : Node("offboard_mission_node")
     [this](
       const std::shared_ptr<std_srvs::srv::Trigger::Request>,
       std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
-      if (controller_->state() != MissionState::HOVER) {
+      if (executor_->state() != MissionState::HOVER) {
         response->success = false;
         response->message = "mission cancellation is only available while hovering";
         return;
@@ -74,16 +74,16 @@ void OffboardMissionNode::on_timer()
   auto inputs = px4_->snapshot(steady_now_us);
   inputs.cancel_requested = cancel_requested_;
   cancel_requested_ = false;
-  const auto actions = controller_->tick(inputs);
-  const auto state = static_cast<int>(controller_->state());
+  const auto actions = executor_->tick(inputs);
+  const auto state = static_cast<int>(executor_->state());
   if (state != last_state_) {
-    RCLCPP_INFO(get_logger(), "mission state: %s", mission_state_name(controller_->state()));
+    RCLCPP_INFO(get_logger(), "mission state: %s", mission_state_name(executor_->state()));
     const auto status = boomboom_status_make(
       BOOMBOOM_STATUS_DOMAIN_MISSION, BOOMBOOM_STATUS_CONDITION_ACTIVE,
       static_cast<std::uint32_t>(state));
     status_pub_->publish(boomboom_common_ros2::to_msg(status));
     const auto snapshot = boomboom_state_snapshot_make(
-      common_state(controller_->state()), controller_->state_reason(), controller_->entered_at_us());
+      common_state(executor_->state()), executor_->state_reason(), executor_->entered_at_us());
     state_pub_->publish(boomboom_common_ros2::to_msg(snapshot));
     boomboom_event_t event{};
     event.sequence = ++event_sequence_;
@@ -93,7 +93,7 @@ void OffboardMissionNode::on_timer()
     event_pub_->publish(boomboom_common_ros2::to_msg(event));
     last_state_ = state;
   }
-  faults_pub_->publish(boomboom_common_ros2::to_msg(controller_->faults()));
+  faults_pub_->publish(boomboom_common_ros2::to_msg(executor_->faults()));
   px4_->publish(actions, steady_now_us);
 }
 }  // namespace offboard_cpp

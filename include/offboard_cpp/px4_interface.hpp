@@ -4,11 +4,24 @@
 #include <memory>
 
 #include <rclcpp/rclcpp.hpp>
+#include <px4_msgs/msg/vehicle_command_ack.hpp>
+#include <px4_msgs/msg/vehicle_local_position.hpp>
 
 #include "offboard_cpp/mission_types.hpp"
 
 namespace offboard_cpp
 {
+
+namespace detail
+{
+constexpr std::uint8_t kPx4TargetSystem = 1;
+constexpr std::uint8_t kPx4TargetComponent = 1;
+constexpr std::uint8_t kMissionSourceSystem = 1;
+constexpr std::uint16_t kMissionSourceComponent = 1;
+
+bool is_mission_offboard_ack(const px4_msgs::msg::VehicleCommandAck & ack);
+bool is_local_position_healthy(const px4_msgs::msg::VehicleLocalPosition & position);
+}  // namespace detail
 
 class Px4Interface
 {
@@ -20,7 +33,6 @@ public:
 
 private:
   struct Data;
-  rclcpp::Node & node_;
   std::unique_ptr<Data> data_;
 };
 
