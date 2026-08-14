@@ -1,4 +1,4 @@
-#include "offboard_cpp/gateway_executor.hpp"
+#include "offboard_cpp/gateway/gateway_executor.hpp"
 
 #include <cmath>
 
@@ -24,8 +24,7 @@ bool finite(const GatewayGoal & goal)
 }  // namespace
 
 GatewayExecutor::GatewayExecutor(MissionConfig config)
-: config_(config),
-  reach_mode_(config.position_tolerance_m, config.velocity_tolerance_mps, config.stable_duration_s)
+: config_(config)
 {}
 
 bool GatewayExecutor::valid_goal(const GatewayGoal & goal)
@@ -36,14 +35,18 @@ bool GatewayExecutor::valid_goal(const GatewayGoal & goal)
 
 bool GatewayExecutor::can_accept(const GatewayGoal & goal) const
 {
+  // TAKEOFF 是唯一可从地面状态开始的命令；后续指令必须建立在已维持的 Offboard
+  // 控制流上，且起飞、降落、接管和故障均不能与另一个 Action 交叠。
   if (!valid_goal(goal) || command_active_ || land_irreversible() ||
-      state_ == GatewayState::TAKEOVER || state_ == GatewayState::FAILED) {
-    return false;
+      state_ == GatewayState::TAKEOVER || state_ == GatewayState::FAILED)
+  {
+        return false;
   }
-  if (goal.command == GatewayCommand::TAKEOFF) {
-    return state_ == GatewayState::WAIT_DISARMED || state_ == GatewayState::READY;
+  if (goal.command == GatewayCommand::TAKEOFF)
+  {
+        return state_ == GatewayState::WAIT_DISARMED || state_ == GatewayState::READY;
   }
-  return state_ == GatewayState::IDLE;
+        return state_ == GatewayState::IDLE;
 }
 
 bool GatewayExecutor::start(const GatewayGoal & goal, std::int64_t now_us)
@@ -66,8 +69,7 @@ bool GatewayExecutor::start(const GatewayGoal & goal, std::int64_t now_us)
       target_[0] = home_[0];
       target_[1] = home_[1];
     }
-    active_mode_ = make_active_mode(goal);
-    active_mode_->on_activate(now_us);
+    activate_goal(now_us);
     enter(GatewayState::EXECUTING, now_us);
   }
   return true;
@@ -123,6 +125,7 @@ void GatewayExecutor::apply_reset(const PositionReset & reset)
     return;
   }
   if (reset.xy_counter != reset_.xy_counter) {
+    // PX4 报告的是同一物理位置在新 NED 原点下的增量，home 与当前目标必须同行平移。
     home_[0] += reset.delta_x;
     home_[1] += reset.delta_y;
     target_[0] += reset.delta_x;
@@ -136,27 +139,48 @@ void GatewayExecutor::apply_reset(const PositionReset & reset)
   reset_ = reset;
 }
 
-ModeBase * GatewayExecutor::make_active_mode(const GatewayGoal & goal)
+void GatewayExecutor::activate_goal(std::int64_t now_us)
 {
-  if (goal.command == GatewayCommand::HOLD) {
-    hold_mode_ = HoldPositionMode(goal.duration_s);
-    return &hold_mode_;
-  }
-  return &reach_mode_;
+  active_since_us_ = now_us;
+  stable_since_us_ = -1;
 }
 
-MissionActions GatewayExecutor::update_mode(const MissionInputs & inputs, bool * complete)
+MissionActions GatewayExecutor::update_setpoint(const MissionInputs & inputs, bool * complete)
 {
-  const auto update = active_mode_->update_setpoint(inputs, PositionTarget{target_, yaw_});
-  *complete = update.result == ModeResult::SUCCEEDED;
-  return update.actions;
+  MissionActions actions;
+  actions.publish_setpoint = true;
+  actions.position_ned = target_;
+  actions.yaw_rad = yaw_;
+  if (goal_.command == GatewayCommand::HOLD) {
+    *complete = inputs.now_us - active_since_us_ >=
+      static_cast<std::int64_t>(goal_.duration_s * kUsPerSecond);
+    return actions;
+  }
+
+  const double dx = inputs.position_ned[0] - target_[0];
+  const double dy = inputs.position_ned[1] - target_[1];
+  const double dz = inputs.position_ned[2] - target_[2];
+  const double speed = std::sqrt(
+    inputs.velocity_ned[0] * inputs.velocity_ned[0] +
+    inputs.velocity_ned[1] * inputs.velocity_ned[1] +
+    inputs.velocity_ned[2] * inputs.velocity_ned[2]);
+  // GOTO/RETURN_HOME 需要位置和速度连续满足门限，瞬时穿越目标不会完成任务。
+  const bool stable = std::sqrt(dx * dx + dy * dy + dz * dz) <= config_.position_tolerance_m &&
+    speed <= config_.velocity_tolerance_mps;
+  if (!stable) {
+    stable_since_us_ = -1;
+  } else if (stable_since_us_ < 0) {
+    stable_since_us_ = inputs.now_us;
+  }
+  *complete = stable_since_us_ >= 0 && inputs.now_us - stable_since_us_ >=
+    static_cast<std::int64_t>(config_.stable_duration_s * kUsPerSecond);
+  return actions;
 }
 
 void GatewayExecutor::hold_current(const MissionInputs & inputs)
 {
   target_ = inputs.position_ned;
   yaw_ = inputs.heading_rad;
-  active_mode_ = nullptr;
 }
 
 MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
@@ -166,7 +190,8 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
   apply_reset(inputs.reset);
   if (inputs.status_fresh && !inputs.armed) { observed_disarmed_ = true; }
 
-  // PX4/RC authority and localization have priority over action cancellation and timeout.
+  // PX4/RC 控制权和定位安全门禁优先于 Action 取消和超时：失去控制权不自动夺回，
+  // 定位失效则请求原地降落，避免在未知位置继续发送设定点。
   if (controls_offboard() && (!inputs.status_fresh || inputs.failsafe ||
       ((state_ == GatewayState::EXECUTING || state_ == GatewayState::IDLE) && !inputs.offboard))) {
     if (command_active_) {
@@ -201,6 +226,7 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
 
   if (cancel_pending_) {
     if (state_ == GatewayState::EXECUTING || state_ == GatewayState::IDLE) {
+      // 空中可取消命令的安全语义是原地 HOLD；此处明确不改写为 RETURN_HOME。
       hold_current(inputs);
       finish(false, true, BOOMBOOM_STATUS_CONDITION_CANCELLED, BOOMBOOM_STATE_REASON_CANCELLED);
       enter(GatewayState::IDLE, inputs.now_us, BOOMBOOM_STATE_REASON_CANCELLED);
@@ -223,17 +249,23 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
         break;
       }
       if (observed_disarmed_ && arm_rising_edge && source_is_rc(inputs.latest_arming_reason)) {
+        // 只接受已观测 DISARMED 之后的 RC 解锁上升沿；程序从不发送 ARM/DISARM。
         home_ = inputs.position_ned;
         target_ = home_;
+        // NED 的 down 轴向下为正，起飞需减小 z。
         target_[2] -= config_.takeoff_height_m;
         yaw_ = inputs.heading_rad;
         enter(GatewayState::OFFBOARD_PRESTREAM, inputs.now_us, BOOMBOOM_STATE_REASON_RC_ARM_EDGE);
-        // Count the arm-edge tick as the first 20 Hz prestream sample.
-        actions = make_position_setpoint(PositionTarget{target_, yaw_});
+        // 将解锁沿的 20 Hz tick 计为第一帧预流，保证时长门禁而不额外延迟一次周期。
+        actions.publish_setpoint = true;
+        actions.position_ned = target_;
+        actions.yaw_rad = yaw_;
       }
       break;
     case GatewayState::OFFBOARD_PRESTREAM:
-      actions = make_position_setpoint(PositionTarget{target_, yaw_});
+      actions.publish_setpoint = true;
+      actions.position_ned = target_;
+      actions.yaw_rad = yaw_;
       if (!inputs.armed) {
         finish(false, false, BOOMBOOM_STATUS_CONDITION_LOST, BOOMBOOM_STATE_REASON_AUTHORITY_LOST);
         enter(GatewayState::WAIT_DISARMED, inputs.now_us);
@@ -247,42 +279,56 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
       }
       break;
     case GatewayState::REQUEST_OFFBOARD:
-      actions = make_position_setpoint(PositionTarget{target_, yaw_});
-      if (inputs.ack_sequence > request_ack_sequence_) {
-        if (inputs.offboard_ack == AckResult::ACCEPTED && !offboard_ack_accepted_) {
+      actions.publish_setpoint = true;
+      actions.position_ned = target_;
+      actions.yaw_rad = yaw_;
+      if (inputs.ack_sequence > request_ack_sequence_)
+      {
+        if (inputs.offboard_ack == AckResult::ACCEPTED && !offboard_ack_accepted_)
+        {
           offboard_ack_accepted_ = true;
           offboard_ack_accepted_at_us_ = inputs.now_us;
-        } else if (inputs.offboard_ack == AckResult::REJECTED) {
+        }
+        else if (inputs.offboard_ack == AckResult::REJECTED)
+        {
           finish(false, false, BOOMBOOM_STATUS_CONDITION_REJECTED, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
           enter(GatewayState::FAILED, inputs.now_us, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
         }
       }
-      if (state_ == GatewayState::REQUEST_OFFBOARD && offboard_ack_accepted_ && inputs.offboard) {
-        active_mode_ = make_active_mode(goal_);
-        active_mode_->on_activate(inputs.now_us);
+      if (state_ == GatewayState::REQUEST_OFFBOARD && offboard_ack_accepted_ && inputs.offboard)
+      {
+        // ACK 仅表示 PX4 接受命令；必须再观察到实际 OFFBOARD 状态才允许执行起飞。
+        activate_goal(inputs.now_us);
         enter(GatewayState::EXECUTING, inputs.now_us, BOOMBOOM_STATE_REASON_OFFBOARD_ACCEPTED);
-      } else if (state_ == GatewayState::REQUEST_OFFBOARD &&
+      }
+      else if (state_ == GatewayState::REQUEST_OFFBOARD &&
         inputs.now_us - (offboard_ack_accepted_ ? offboard_ack_accepted_at_us_ : entered_at_us_) >=
         static_cast<std::int64_t>((offboard_ack_accepted_ ? config_.offboard_state_timeout_s :
-          config_.offboard_ack_timeout_s) * kUsPerSecond)) {
+          config_.offboard_ack_timeout_s) * kUsPerSecond))
+      {
         finish(false, false, BOOMBOOM_STATUS_CONDITION_TIMEOUT, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
         enter(GatewayState::FAILED, inputs.now_us, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
       }
       break;
-    case GatewayState::EXECUTING: {
+
+    case GatewayState::EXECUTING:
+    {
       bool complete = false;
-      actions = update_mode(inputs, &complete);
-      if (complete) {
+      actions = update_setpoint(inputs, &complete);
+      if (complete)
+      {
         finish(true, false, BOOMBOOM_STATUS_CONDITION_COMPLETE, BOOMBOOM_STATE_REASON_TARGET_REACHED);
-        active_mode_ = nullptr;
         enter(GatewayState::IDLE, inputs.now_us, BOOMBOOM_STATE_REASON_TARGET_REACHED);
       }
       break;
     }
     case GatewayState::IDLE:
-      actions = make_position_setpoint(PositionTarget{target_, yaw_});
+      actions.publish_setpoint = true;
+      actions.position_ned = target_;
+      actions.yaw_rad = yaw_;
       break;
     case GatewayState::LAND_REQUEST:
+      // 记录请求前的序号；WAIT_LANDED 只接收之后的新落地样本，避免旧 true 立即完成。
       actions.request_land = true;
       land_request_sequence_ = inputs.landed_sequence;
       enter(GatewayState::WAIT_LANDED, inputs.now_us);

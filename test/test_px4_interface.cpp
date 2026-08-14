@@ -4,7 +4,7 @@
 
 #include <px4_msgs/msg/vehicle_command.hpp>
 
-#include "offboard_cpp/px4_interface.hpp"
+#include "offboard_cpp/px4/px4_interface.hpp"
 
 namespace
 {
