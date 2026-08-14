@@ -1,4 +1,4 @@
-#include "offboard_cpp/px4_interface.hpp"
+#include "offboard_cpp/px4/px4_interface.hpp"
 
 #include <cmath>
 #include <chrono>
@@ -19,7 +19,8 @@ namespace detail
 {
 bool is_mission_offboard_ack(const px4_msgs::msg::VehicleCommandAck & ack)
 {
-  // PX4 copies VehicleCommand.source_* into VehicleCommandAck.target_*.
+  // PX4 将 VehicleCommand.source_* 回填到 VehicleCommandAck.target_*；只按 command
+  // 匹配会把 QGC 或其他节点的 DO_SET_MODE 回复错误地当作本任务 ACK。
   return ack.command == px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE &&
          ack.target_system == kMissionSourceSystem &&
          ack.target_component == kMissionSourceComponent;
@@ -44,6 +45,7 @@ constexpr std::int64_t kTimesyncMaxAgeUs = 2500000;
 
 bool fresh(std::int64_t received_us, std::int64_t now_us, std::int64_t max_age_us)
 {
+  // received_us 与 now_us 都来自 steady_clock；负 age 代表时钟域/调用约束已被破坏。
   return received_us >= 0 && now_us >= received_us && now_us - received_us < max_age_us;
 }
 
@@ -56,6 +58,8 @@ std::int64_t steady_now_us()
 
 struct Px4Interface::Data
 {
+  // 回调写入最近一帧，timer 通过 snapshot 读取。同一节点以默认单线程 spin 运行，
+  // 因而不额外加锁；若改为 MultiThreadedExecutor，必须同步这些共享字段。
   rclcpp::Publisher<px4_msgs::msg::OffboardControlMode>::SharedPtr mode_pub;
   rclcpp::Publisher<px4_msgs::msg::TrajectorySetpoint>::SharedPtr setpoint_pub;
   rclcpp::Publisher<px4_msgs::msg::VehicleCommand>::SharedPtr command_pub;
@@ -82,6 +86,7 @@ Px4Interface::~Px4Interface() = default;
 Px4Interface::Px4Interface(rclcpp::Node & node) : data_(std::make_unique<Data>())
 {
   const auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile();
+  // 这些是整个生产系统唯一的 PX4 控制写入方；其他包只能经 ExecuteFlight 请求飞行。
   data_->mode_pub = node.create_publisher<px4_msgs::msg::OffboardControlMode>(
     "/fmu/in/offboard_control_mode", qos);
   data_->setpoint_pub = node.create_publisher<px4_msgs::msg::TrajectorySetpoint>(
@@ -110,6 +115,7 @@ Px4Interface::Px4Interface(rclcpp::Node & node) : data_(std::make_unique<Data>()
     "/fmu/out/vehicle_command_ack", qos,
     [this](px4_msgs::msg::VehicleCommandAck::ConstSharedPtr msg) {
       if (detail::is_mission_offboard_ack(*msg)) {
+        // 用匹配 ACK 到达次数驱动状态机；不复用旧 ACK，也不对拒绝结果自动重试。
         data_->ack = msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED ?
           AckResult::ACCEPTED : AckResult::REJECTED;
         ++data_->ack_sequence;
@@ -149,10 +155,16 @@ MissionInputs Px4Interface::snapshot(std::int64_t steady_now_us) const
 
 void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_now_us)
 {
-  if (!fresh(data_->timesync_received_us, steady_now_us, kTimesyncMaxAgeUs)) { return; }
+  // PX4 时间戳以最近 timesync 的 PX4 boot-time 为基准推进；没有新鲜同步则禁止写入。
+  if (!fresh(data_->timesync_received_us, steady_now_us, kTimesyncMaxAgeUs))
+  {
+     return;
+  }
   const auto timestamp = data_->px4_timestamp_us +
     static_cast<std::uint64_t>(steady_now_us - data_->timesync_received_us);
-  if (actions.publish_setpoint) {
+  if (actions.publish_setpoint)
+  {
+    // 只声明 position 控制；速度、加速度和 jerk 为 NaN，避免 PX4 将它们当作约束。
     const auto nan = std::numeric_limits<float>::quiet_NaN();
     px4_msgs::msg::OffboardControlMode mode{};
     mode.timestamp = timestamp;
@@ -169,7 +181,8 @@ void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_n
     data_->mode_pub->publish(mode);
     data_->setpoint_pub->publish(setpoint);
   }
-  if (actions.request_offboard || actions.request_land) {
+  if (actions.request_offboard || actions.request_land)
+  {
     px4_msgs::msg::VehicleCommand command{};
     command.timestamp = timestamp;
     command.target_system = detail::kPx4TargetSystem;
@@ -177,11 +190,16 @@ void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_n
     command.source_system = detail::kMissionSourceSystem;
     command.source_component = detail::kMissionSourceComponent;
     command.from_external = true;
-    if (actions.request_offboard) {
+    if (actions.request_offboard)
+    {
+      // PX4 DO_SET_MODE: param1=custom mode enabled, param2=PX4 Offboard main mode。
       command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_DO_SET_MODE;
       command.param1 = 1.0F;
       command.param2 = 6.0F;
-    } else {
+    }
+    else
+    {
+      // LAND 不携带位置目标；一旦状态机发出该请求，就转入不可取消的落地确认流程。
       command.command = px4_msgs::msg::VehicleCommand::VEHICLE_CMD_NAV_LAND;
     }
     data_->command_pub->publish(command);

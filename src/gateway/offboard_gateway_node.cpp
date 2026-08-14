@@ -1,9 +1,9 @@
-#include "offboard_cpp/offboard_gateway_node.hpp"
+#include "offboard_cpp/gateway/offboard_gateway_node.hpp"
 
 #include <chrono>
 
-#include "offboard_cpp/gateway_executor.hpp"
-#include "offboard_cpp/px4_interface.hpp"
+#include "offboard_cpp/gateway/gateway_executor.hpp"
+#include "offboard_cpp/px4/px4_interface.hpp"
 
 extern "C" {
 #include <boomboom_common/state.h>
@@ -16,6 +16,7 @@ namespace
 {
 std::int64_t steady_now_us()
 {
+  // 状态机超时使用单调时钟，主机 NTP/WSL 校时不能缩短或延长安全窗口。
   return std::chrono::duration_cast<std::chrono::microseconds>(
     std::chrono::steady_clock::now().time_since_epoch()).count();
 }
@@ -53,10 +54,31 @@ OffboardGatewayNode::OffboardGatewayNode() : Node("offboard_gateway_node")
     },
     [this](const std::shared_ptr<GoalHandle> goal_handle) { return handle_cancel(goal_handle); },
     [this](const std::shared_ptr<GoalHandle> goal_handle) { handle_accepted(goal_handle); });
+  // 50 ms 即 20 Hz；预流、状态机 tick 和 /fmu/in 发送在同一串行 timer 路径中闭环。
   timer_ = create_wall_timer(std::chrono::milliseconds(50), [this]() { on_timer(); });
 }
 
 OffboardGatewayNode::~OffboardGatewayNode() = default;
+
+std::uint8_t OffboardGatewayNode::flight_state_value(GatewayState state, GatewayCommand command)
+{
+  using FlightState = boomboom_common::msg::FlightState;
+  switch (state) {
+    case GatewayState::WAIT_DISARMED: return FlightState::IDLE;
+    case GatewayState::READY:
+    case GatewayState::WAIT_RC_ARM: return FlightState::READY;
+    case GatewayState::OFFBOARD_PRESTREAM:
+    case GatewayState::REQUEST_OFFBOARD:
+    case GatewayState::EXECUTING:
+      return command == GatewayCommand::HOLD ? FlightState::HOLDING : FlightState::EXECUTING;
+    case GatewayState::IDLE: return FlightState::HOLDING;
+    case GatewayState::LAND_REQUEST:
+    case GatewayState::WAIT_LANDED: return FlightState::LANDING;
+    case GatewayState::TAKEOVER:
+    case GatewayState::FAILED: return FlightState::FAILED;
+  }
+  return FlightState::UNKNOWN;
+}
 
 rclcpp_action::GoalResponse OffboardGatewayNode::handle_goal(
   const rclcpp_action::GoalUUID &, std::shared_ptr<const ExecuteFlight::Goal> goal)
@@ -95,7 +117,7 @@ boomboom_common::msg::FlightState OffboardGatewayNode::flight_state()
 {
   boomboom_common::msg::FlightState state;
   state.stamp = get_clock()->now();
-  state.state = gateway_flight_state_value(executor_->state(), executor_->active_command());
+  state.state = flight_state_value(executor_->state(), executor_->active_command());
   state.reason = executor_->state_reason();
   state.armed = last_inputs_.armed;
   state.offboard = last_inputs_.offboard;
@@ -117,6 +139,7 @@ void OffboardGatewayNode::finish_active_goal()
   result->status.condition = gateway_result.condition;
   result->status.detail = static_cast<std::uint32_t>(gateway_result.reason);
   result->final_state = flight_state();
+  // Action 终态只在 completion_sequence 变化后结算，避免 timer 持续 tick 重复回调。
   if (gateway_result.cancelled) {
     active_goal_->canceled(result);
   } else if (gateway_result.succeeded) {
@@ -144,6 +167,7 @@ void OffboardGatewayNode::on_timer()
     observed_completion_sequence_ = executor_->completion_sequence();
     finish_active_goal();
   }
+  // 先归约并发布可观测状态/Action 结果，再由唯一接口写入 PX4，保证写入决策可追溯。
   px4_->publish(actions, now_us);
 }
 

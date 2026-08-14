@@ -1,8 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <boomboom_common/msg/flight_state.hpp>
+
 #include <limits>
 
-#include "offboard_cpp/gateway_executor.hpp"
+#include "offboard_cpp/gateway/gateway_executor.hpp"
+#include "offboard_cpp/gateway/offboard_gateway_node.hpp"
 
 namespace
 {
@@ -53,10 +56,26 @@ void takeoff_to_idle(offboard_cpp::GatewayExecutor & executor)
   executor.tick(inputs);
   EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::EXECUTING);
   inputs.position_ned[2] = -1.6;
-  ++inputs.now_us;
+  executor.tick(inputs);
+  inputs.now_us += 1000000;
   executor.tick(inputs);
   EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::IDLE);
 }
+
+TEST(GatewayExecutor, RejectsNegativeTimeout)
+{
+  // Arrange
+  auto goal = takeoff_goal();
+  goal.timeout_s = -1.0;
+
+  // Act
+  const bool valid =
+    offboard_cpp::GatewayExecutor::valid_goal(goal);
+
+  // Assert
+  EXPECT_FALSE(valid);
+}
+
 
 TEST(GatewayExecutor, ValidatesCommandsAndOnlyAcceptsTakeoffBeforeOffboard)
 {
@@ -123,6 +142,49 @@ TEST(GatewayExecutor, CancelGotoBecomesHoldWithoutReturnHome)
   EXPECT_TRUE(executor.result().cancelled);
 }
 
+TEST(GatewayExecutor, GotoPublishesRequestedTargetAndYaw)
+{
+  offboard_cpp::GatewayExecutor executor;
+  takeoff_to_idle(executor);
+
+  auto goal = takeoff_goal();
+  goal.command = offboard_cpp::GatewayCommand::GOTO;
+  goal.target_ned = {3.0, -2.0, -1.5};
+  goal.yaw_rad = 0.5;
+  ASSERT_TRUE(executor.start(goal, 3000000));
+
+  auto inputs = inputs_at(3000001);
+  inputs.armed = true;
+  inputs.offboard = true;
+
+  const auto actions = executor.tick(inputs);
+
+  EXPECT_TRUE(actions.publish_setpoint);
+  EXPECT_EQ(actions.position_ned, goal.target_ned);
+  EXPECT_DOUBLE_EQ(actions.yaw_rad, goal.yaw_rad);
+}
+
+
+TEST(GatewayExecutor, HoldCompletesAtRequestedDuration)
+{
+  offboard_cpp::GatewayExecutor executor;
+  takeoff_to_idle(executor);
+  auto goal = takeoff_goal();
+  goal.command = offboard_cpp::GatewayCommand::HOLD;
+  goal.duration_s = 2.0;
+  ASSERT_TRUE(executor.start(goal, 3000000));
+
+  auto inputs = inputs_at(4999999);
+  inputs.armed = true;
+  inputs.offboard = true;
+  EXPECT_EQ(executor.tick(inputs).publish_setpoint, true);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::EXECUTING);
+  inputs.now_us = 5000000;
+  executor.tick(inputs);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::IDLE);
+  EXPECT_TRUE(executor.result().succeeded);
+}
+
 TEST(GatewayExecutor, LocalizationLossOverridesCancelAndRequestsInPlaceLand)
 {
   offboard_cpp::MissionConfig config;
@@ -168,4 +230,29 @@ TEST(GatewayExecutor, LandCannotBeCancelledAndCompletesAfterNewLandingSample)
   EXPECT_TRUE(executor.result().succeeded);
   EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::WAIT_DISARMED);
 }
+
+TEST(GatewayExecutor, TakeoverAndFailureNeverReportComplete)
+{
+  using boomboom_common::msg::FlightState;
+  using offboard_cpp::GatewayCommand;
+  using offboard_cpp::GatewayState;
+  using offboard_cpp::OffboardGatewayNode;
+
+  EXPECT_EQ(
+    OffboardGatewayNode::flight_state_value(GatewayState::TAKEOVER, GatewayCommand::GOTO),
+    FlightState::FAILED);
+  EXPECT_EQ(
+    OffboardGatewayNode::flight_state_value(GatewayState::FAILED, GatewayCommand::GOTO),
+    FlightState::FAILED);
+  EXPECT_NE(
+    OffboardGatewayNode::flight_state_value(GatewayState::TAKEOVER, GatewayCommand::GOTO),
+    FlightState::COMPLETE);
+  EXPECT_NE(
+    OffboardGatewayNode::flight_state_value(GatewayState::FAILED, GatewayCommand::GOTO),
+    FlightState::COMPLETE);
+}
+
+
+
+
 }  // namespace
