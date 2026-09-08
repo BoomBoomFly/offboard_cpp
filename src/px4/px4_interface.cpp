@@ -26,9 +26,17 @@ bool is_mission_offboard_ack(const px4_msgs::msg::VehicleCommandAck & ack)
          ack.target_component == kMissionSourceComponent;
 }
 
+bool is_mission_land_ack(const px4_msgs::msg::VehicleCommandAck & ack)
+{
+  return ack.command == px4_msgs::msg::VehicleCommand::VEHICLE_CMD_NAV_LAND &&
+         ack.target_system == kMissionSourceSystem &&
+         ack.target_component == kMissionSourceComponent;
+}
+
 bool is_local_position_healthy(const px4_msgs::msg::VehicleLocalPosition & position)
 {
-  return position.xy_valid && position.z_valid && position.heading_good_for_control &&
+  return position.xy_valid && position.z_valid && position.v_xy_valid && position.v_z_valid &&
+         position.heading_good_for_control &&
          std::isfinite(position.x) && std::isfinite(position.y) &&
          std::isfinite(position.z) && std::isfinite(position.vx) &&
          std::isfinite(position.vy) && std::isfinite(position.vz) &&
@@ -73,6 +81,8 @@ struct Px4Interface::Data
   bool landed{};
   std::uint64_t landed_sequence{};
   AckResult ack{AckResult::NONE};
+  AckResult land_ack{AckResult::NONE};
+  std::uint64_t land_ack_sequence{};
   std::uint64_t ack_sequence{};
   std::int64_t status_received_us{-1};
   std::int64_t position_received_us{-1};
@@ -114,6 +124,15 @@ Px4Interface::Px4Interface(rclcpp::Node & node) : data_(std::make_unique<Data>()
   data_->ack_sub = node.create_subscription<px4_msgs::msg::VehicleCommandAck>(
     "/fmu/out/vehicle_command_ack", qos,
     [this](px4_msgs::msg::VehicleCommandAck::ConstSharedPtr msg) {
+      // IN_PROGRESS 是中间状态，不应误判为拒绝。
+      if (msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_IN_PROGRESS) {
+        return;
+      }
+      if (detail::is_mission_land_ack(*msg)) {
+        data_->land_ack = msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED ?
+          AckResult::ACCEPTED : AckResult::REJECTED;
+        ++data_->land_ack_sequence;
+      }
       if (detail::is_mission_offboard_ack(*msg)) {
         // 用匹配 ACK 到达次数驱动状态机；不复用旧 ACK，也不对拒绝结果自动重试。
         data_->ack = msg->result == px4_msgs::msg::VehicleCommandAck::VEHICLE_CMD_RESULT_ACCEPTED ?
@@ -123,6 +142,7 @@ Px4Interface::Px4Interface(rclcpp::Node & node) : data_(std::make_unique<Data>()
     });
   data_->timesync_sub = node.create_subscription<px4_msgs::msg::TimesyncStatus>(
     "/fmu/out/timesync_status", qos, [this](px4_msgs::msg::TimesyncStatus::ConstSharedPtr msg) {
+      if (msg->timestamp == 0) { return; }
       data_->px4_timestamp_us = msg->timestamp;
       data_->timesync_received_us = steady_now_us();
     });
@@ -132,6 +152,10 @@ MissionInputs Px4Interface::snapshot(std::int64_t steady_now_us) const
 {
   MissionInputs inputs;
   inputs.now_us = steady_now_us;
+  inputs.timesync_fresh = fresh(data_->timesync_received_us, steady_now_us, kTimesyncMaxAgeUs);
+  inputs.auto_land = data_->status.nav_state == px4_msgs::msg::VehicleStatus::NAVIGATION_STATE_AUTO_LAND;
+  inputs.land_ack = data_->land_ack;
+  inputs.land_ack_sequence = data_->land_ack_sequence;
   inputs.status_fresh = fresh(data_->status_received_us, steady_now_us, kStatusMaxAgeUs);
   inputs.local_position_fresh = fresh(data_->position_received_us, steady_now_us, kPositionMaxAgeUs);
   inputs.local_position_healthy = detail::is_local_position_healthy(data_->position);
@@ -153,12 +177,12 @@ MissionInputs Px4Interface::snapshot(std::int64_t steady_now_us) const
   return inputs;
 }
 
-void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_now_us)
+bool Px4Interface::publish(const MissionActions & actions, std::int64_t steady_now_us)
 {
-  // PX4 时间戳以最近 timesync 的 PX4 boot-time 为基准推进；没有新鲜同步则禁止写入。
+  // 使用 timesync 的 DDS 边界时间域；PX4 反序列化时减同步 offset。
   if (!fresh(data_->timesync_received_us, steady_now_us, kTimesyncMaxAgeUs))
   {
-     return;
+     return false;
   }
   const auto timestamp = data_->px4_timestamp_us +
     static_cast<std::uint64_t>(steady_now_us - data_->timesync_received_us);
@@ -204,5 +228,6 @@ void Px4Interface::publish(const MissionActions & actions, std::int64_t steady_n
     }
     data_->command_pub->publish(command);
   }
+  return true;
 }
 }  // namespace offboard_cpp

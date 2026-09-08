@@ -40,13 +40,13 @@ bool GatewayExecutor::can_accept(const GatewayGoal & goal) const
   if (!valid_goal(goal) || command_active_ || land_irreversible() ||
       state_ == GatewayState::TAKEOVER || state_ == GatewayState::FAILED)
   {
-        return false;
+    return false;
   }
   if (goal.command == GatewayCommand::TAKEOFF)
   {
-        return state_ == GatewayState::WAIT_DISARMED || state_ == GatewayState::READY;
+    return state_ == GatewayState::WAIT_DISARMED || state_ == GatewayState::READY;
   }
-        return state_ == GatewayState::IDLE;
+  return state_ == GatewayState::IDLE;
 }
 
 bool GatewayExecutor::start(const GatewayGoal & goal, std::int64_t now_us)
@@ -193,6 +193,7 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
   // PX4/RC 控制权和定位安全门禁优先于 Action 取消和超时：失去控制权不自动夺回，
   // 定位失效则请求原地降落，避免在未知位置继续发送设定点。
   if (controls_offboard() && (!inputs.status_fresh || inputs.failsafe ||
+      !inputs.armed ||
       ((state_ == GatewayState::EXECUTING || state_ == GatewayState::IDLE) && !inputs.offboard))) {
     if (command_active_) {
       finish(false, false, inputs.failsafe ? BOOMBOOM_STATUS_CONDITION_FAILSAFE :
@@ -225,7 +226,7 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
   }
 
   if (cancel_pending_) {
-    if (state_ == GatewayState::EXECUTING || state_ == GatewayState::IDLE) {
+    if (controls_offboard() && inputs.offboard) {
       // 空中可取消命令的安全语义是原地 HOLD；此处明确不改写为 RETURN_HOME。
       hold_current(inputs);
       finish(false, true, BOOMBOOM_STATUS_CONDITION_CANCELLED, BOOMBOOM_STATE_REASON_CANCELLED);
@@ -245,7 +246,8 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
     case GatewayState::READY:
       break;
     case GatewayState::WAIT_RC_ARM:
-      if (!inputs.status_fresh || !inputs.local_position_fresh || !inputs.local_position_healthy) {
+      if (!inputs.status_fresh || inputs.failsafe || !inputs.local_position_fresh ||
+        !inputs.local_position_healthy) {
         break;
       }
       if (observed_disarmed_ && arm_rising_edge && source_is_rc(inputs.latest_arming_reason)) {
@@ -256,20 +258,24 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
         target_[2] -= config_.takeoff_height_m;
         yaw_ = inputs.heading_rad;
         enter(GatewayState::OFFBOARD_PRESTREAM, inputs.now_us, BOOMBOOM_STATE_REASON_RC_ARM_EDGE);
-        // 将解锁沿的 20 Hz tick 计为第一帧预流，保证时长门禁而不额外延迟一次周期。
+        if (!inputs.timesync_fresh) { entered_at_us_ = -1; }
+        // 有时间同步时，解锁沿的 tick 才是第一帧预流。
         actions.publish_setpoint = true;
         actions.position_ned = target_;
         actions.yaw_rad = yaw_;
       }
       break;
     case GatewayState::OFFBOARD_PRESTREAM:
+      if (!inputs.timesync_fresh) {
+        // 未实际发送的时间不能累计为预流；恢复同步后重新积累完整窗口。
+        entered_at_us_ = -1;
+        break;
+      }
+      if (entered_at_us_ < 0) { entered_at_us_ = inputs.now_us; }
       actions.publish_setpoint = true;
       actions.position_ned = target_;
       actions.yaw_rad = yaw_;
-      if (!inputs.armed) {
-        finish(false, false, BOOMBOOM_STATUS_CONDITION_LOST, BOOMBOOM_STATE_REASON_AUTHORITY_LOST);
-        enter(GatewayState::WAIT_DISARMED, inputs.now_us);
-      } else if (inputs.now_us - entered_at_us_ >=
+      if (inputs.now_us - entered_at_us_ >=
         static_cast<std::int64_t>(config_.prestream_duration_s * kUsPerSecond)) {
         request_ack_sequence_ = inputs.ack_sequence;
         offboard_ack_accepted_ = false;
@@ -328,24 +334,67 @@ MissionActions GatewayExecutor::tick(const MissionInputs & inputs)
       actions.yaw_rad = yaw_;
       break;
     case GatewayState::LAND_REQUEST:
-      // 记录请求前的序号；WAIT_LANDED 只接收之后的新落地样本，避免旧 true 立即完成。
-      actions.request_land = true;
-      land_request_sequence_ = inputs.landed_sequence;
-      enter(GatewayState::WAIT_LANDED, inputs.now_us);
-      break;
     case GatewayState::WAIT_LANDED:
-      if (inputs.landed_sequence > land_request_sequence_ && inputs.landed) {
+    {
+      const bool sent = state_ == GatewayState::WAIT_LANDED;
+      const bool accepted = sent && inputs.land_ack_sequence > land_ack_sequence_ &&
+        inputs.land_ack == AckResult::ACCEPTED;
+      if (!inputs.status_fresh || inputs.failsafe ||
+        (!inputs.offboard && !inputs.auto_land && inputs.armed))
+      {
+        if (command_active_) {
+          finish(false, false, BOOMBOOM_STATUS_CONDITION_LOST, BOOMBOOM_STATE_REASON_AUTHORITY_LOST);
+        }
+        enter(GatewayState::TAKEOVER, inputs.now_us, BOOMBOOM_STATE_REASON_AUTHORITY_LOST);
+      } else if (sent && (accepted || inputs.auto_land) &&
+        inputs.landed_sequence > land_request_sequence_ && inputs.landed)
+      {
         if (command_active_) {
           finish(true, false, BOOMBOOM_STATUS_CONDITION_COMPLETE, BOOMBOOM_STATE_REASON_LANDED);
         }
         enter(GatewayState::WAIT_DISARMED, inputs.now_us, BOOMBOOM_STATE_REASON_LANDED);
+      } else if (sent && inputs.land_ack_sequence > land_ack_sequence_ &&
+        inputs.land_ack == AckResult::REJECTED)
+      {
+        if (command_active_) {
+          finish(false, false, BOOMBOOM_STATUS_CONDITION_REJECTED, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
+        }
+        enter(GatewayState::FAILED, inputs.now_us, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
+      } else if (!inputs.armed) {
+        if (command_active_) {
+          finish(false, false, BOOMBOOM_STATUS_CONDITION_LOST, BOOMBOOM_STATE_REASON_AUTHORITY_LOST);
+        }
+        enter(GatewayState::TAKEOVER, inputs.now_us, BOOMBOOM_STATE_REASON_AUTHORITY_LOST);
+      } else if ((inputs.now_us - entered_at_us_ >= static_cast<std::int64_t>(
+          (sent && (accepted || inputs.auto_land) ? config_.land_timeout_s :
+          config_.land_ack_timeout_s) * kUsPerSecond)) ||
+        (command_active_ && goal_.timeout_s > 0.0 && inputs.now_us - goal_started_at_us_ >=
+          static_cast<std::int64_t>(goal_.timeout_s * kUsPerSecond)))
+      {
+        if (command_active_) {
+          finish(false, false, BOOMBOOM_STATUS_CONDITION_TIMEOUT, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
+        }
+        enter(GatewayState::FAILED, inputs.now_us, BOOMBOOM_STATE_REASON_COMMAND_REJECTED);
+      } else if (!sent) {
+        actions.request_land = true;
       }
       break;
+    }
     case GatewayState::TAKEOVER:
     case GatewayState::FAILED:
       break;
   }
+  // 本 tick 内拒绝/超时后也立即停止预先构造的 setpoint。
+  if (!controls_offboard()) { actions.publish_setpoint = false; }
   return actions;
+}
+
+void GatewayExecutor::land_sent(const MissionInputs & inputs)
+{
+  if (state_ != GatewayState::LAND_REQUEST) { return; }
+  land_request_sequence_ = inputs.landed_sequence;
+  land_ack_sequence_ = inputs.land_ack_sequence;
+  enter(GatewayState::WAIT_LANDED, inputs.now_us, state_reason_);
 }
 
 }  // namespace offboard_cpp

@@ -26,6 +26,8 @@ struct MissionConfig {
   double prestream_duration_s{1.0};
   double offboard_ack_timeout_s{2.0};
   double offboard_state_timeout_s{2.0};
+  double land_ack_timeout_s{2.0};
+  double land_timeout_s{60.0};
   double position_tolerance_m{0.20};
   double velocity_tolerance_mps{0.15};
   double stable_duration_s{1.0};
@@ -35,10 +37,12 @@ struct MissionInputs {
   // now_us 是单调时钟，用于超时与稳定窗口，不能使用会被系统校时跳变的墙上时间。
   std::int64_t now_us{};
   bool status_fresh{};
+  bool timesync_fresh{};
   bool local_position_fresh{};
   bool local_position_healthy{};
   bool armed{};
   bool offboard{};
+  bool auto_land{};
   bool failsafe{};
   bool landed{};
   // 落地检测每收到一帧递增；LAND 后只接受更晚的一帧 landed=true，不能消费旧缓存。
@@ -51,6 +55,8 @@ struct MissionInputs {
   // 仅记录发给本 mission source 的 Offboard 命令 ACK；序号防止重复读取旧 ACK。
   std::uint64_t ack_sequence{};
   AckResult offboard_ack{AckResult::NONE};
+  std::uint64_t land_ack_sequence{};
+  AckResult land_ack{AckResult::NONE};
 };
 
 struct MissionActions {

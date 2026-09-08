@@ -32,3 +32,15 @@ colcon build --packages-select offboard_cpp --symlink-install
 source install/setup.bash
 ctest --test-dir build/offboard_cpp --output-on-failure
 ```
+
+## 本轮审查修复（2026-09-07）
+
+- `mission_common.yaml` 为独立、SITL、hardware 入口的唯一网关参数文件。
+- `LAND_REQUEST` 等待发送层成功交给 ROS publisher 后才冻结 ACK/landed 序号并进入
+  `WAIT_LANDED`；这不代表 DDS 投递或 PX4 接受，后者仍由匹配 Land ACK / 实际 AUTO_LAND 确认。
+- 未发送或未确认默认 2 s 超时，已确认 Land 默认 60 s 超时；Action 指定的 timeout 同样生效。
+  拒绝、失联、接管均终止等待，不自动重发已发送命令或抢回控制权。
+- 成功仍须请求后新的 landed 样本；Land 不可取消。
+- 握手期间取消若已实际 Offboard，则保持当前位置。时间同步中断不计入预流时长。
+- EKF2 位置、速度与 heading 有效性必须同时满足；参数拒绝非有限数或无效预流时长。
+- DDS 时间戳基于同步状态的边界时间域推进，PX4 在反序列化时还原 boot-time。

@@ -1,6 +1,8 @@
 #include "offboard_cpp/gateway/offboard_gateway_node.hpp"
 
 #include <chrono>
+#include <cmath>
+#include <stdexcept>
 
 #include "offboard_cpp/gateway/gateway_executor.hpp"
 #include "offboard_cpp/px4/px4_interface.hpp"
@@ -41,9 +43,24 @@ OffboardGatewayNode::OffboardGatewayNode() : Node("offboard_gateway_node")
   config.prestream_duration_s = declare_parameter<double>("mission.prestream_duration_s", 1.0);
   config.offboard_ack_timeout_s = declare_parameter<double>("mission.offboard_ack_timeout_s", 2.0);
   config.offboard_state_timeout_s = declare_parameter<double>("mission.offboard_state_timeout_s", 2.0);
+  config.land_ack_timeout_s = declare_parameter<double>("mission.land_ack_timeout_s", 2.0);
+  config.land_timeout_s = declare_parameter<double>("mission.land_timeout_s", 60.0);
   config.position_tolerance_m = declare_parameter<double>("mission.position_tolerance_m", 0.20);
   config.velocity_tolerance_mps = declare_parameter<double>("mission.velocity_tolerance_mps", 0.15);
   config.stable_duration_s = declare_parameter<double>("mission.stable_duration_s", 1.0);
+  for (double value : {config.takeoff_height_m, config.offboard_ack_timeout_s,
+    config.offboard_state_timeout_s, config.land_ack_timeout_s, config.land_timeout_s,
+    config.position_tolerance_m, config.velocity_tolerance_mps})
+  {
+    if (!std::isfinite(value) || value <= 0.0) {
+      throw std::invalid_argument("mission heights, tolerances and timeouts must be finite and positive");
+    }
+  }
+  if (!std::isfinite(config.prestream_duration_s) || config.prestream_duration_s < 1.0 ||
+    !std::isfinite(config.stable_duration_s) || config.stable_duration_s < 0.0)
+  {
+    throw std::invalid_argument("prestream must be >= 1 s; stable duration must be finite and >= 0");
+  }
   executor_ = std::make_unique<GatewayExecutor>(config);
   px4_ = std::make_unique<Px4Interface>(*this);
   state_pub_ = create_publisher<boomboom_common::msg::FlightState>("/boomboom/flight_state", 10);
@@ -168,7 +185,9 @@ void OffboardGatewayNode::on_timer()
     finish_active_goal();
   }
   // 先归约并发布可观测状态/Action 结果，再由唯一接口写入 PX4，保证写入决策可追溯。
-  px4_->publish(actions, now_us);
+  if (px4_->publish(actions, now_us) && actions.request_land) {
+    executor_->land_sent(last_inputs_);
+  }
 }
 
 }  // namespace offboard_cpp

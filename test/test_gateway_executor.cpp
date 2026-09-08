@@ -14,6 +14,7 @@ offboard_cpp::MissionInputs inputs_at(std::int64_t now_us)
   offboard_cpp::MissionInputs inputs;
   inputs.now_us = now_us;
   inputs.status_fresh = true;
+  inputs.timesync_fresh = true;
   inputs.local_position_fresh = true;
   inputs.local_position_healthy = true;
   inputs.position_ned = {10.0, 20.0, -0.1};
@@ -202,6 +203,8 @@ TEST(GatewayExecutor, LocalizationLossOverridesCancelAndRequestsInPlaceLand)
   inputs.local_position_healthy = false;
   const auto actions = executor.tick(inputs);
   EXPECT_TRUE(actions.request_land);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::LAND_REQUEST);
+  executor.land_sent(inputs);
   EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::WAIT_LANDED);
   EXPECT_FALSE(executor.result().cancelled);
   EXPECT_FALSE(executor.cancel_requested());
@@ -222,8 +225,14 @@ TEST(GatewayExecutor, LandCannotBeCancelledAndCompletesAfterNewLandingSample)
   inputs.offboard = true;
   inputs.landed_sequence = 4;
   EXPECT_TRUE(executor.tick(inputs).request_land);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::LAND_REQUEST);
+  executor.land_sent(inputs);
   EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::WAIT_LANDED);
   inputs.landed = true;
+  inputs.land_ack = offboard_cpp::AckResult::ACCEPTED;
+  ++inputs.land_ack_sequence;
+  executor.tick(inputs);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::WAIT_LANDED);
   ++inputs.landed_sequence;
   ++inputs.now_us;
   executor.tick(inputs);
@@ -251,8 +260,99 @@ TEST(GatewayExecutor, TakeoverAndFailureNeverReportComplete)
     OffboardGatewayNode::flight_state_value(GatewayState::FAILED, GatewayCommand::GOTO),
     FlightState::COMPLETE);
 }
-
-
-
-
 }  // namespace
+
+TEST(GatewayRegression, CancelDuringSuccessfulHandshakeHoldsCurrentPosition)
+{
+  offboard_cpp::GatewayExecutor executor;
+  boot_to_ready(executor);
+  ASSERT_TRUE(executor.start(takeoff_goal(), 1));
+  auto inputs = inputs_at(2);
+  inputs.armed = true;
+  inputs.latest_arming_reason = 1;
+  executor.tick(inputs);
+  inputs.now_us += 1000000;
+  ASSERT_TRUE(executor.tick(inputs).request_offboard);
+  inputs.offboard = true;
+  inputs.offboard_ack = offboard_cpp::AckResult::ACCEPTED;
+  inputs.ack_sequence = 1;
+  executor.request_cancel();
+  ++inputs.now_us;
+  const auto actions = executor.tick(inputs);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::IDLE);
+  EXPECT_TRUE(executor.result().cancelled);
+  EXPECT_TRUE(actions.publish_setpoint);
+  EXPECT_EQ(actions.position_ned, inputs.position_ned);
+}
+
+TEST(GatewayRegression, LostSyncDoesNotCountAsPrestream)
+{
+  offboard_cpp::GatewayExecutor executor;
+  boot_to_ready(executor);
+  ASSERT_TRUE(executor.start(takeoff_goal(), 1));
+  auto inputs = inputs_at(2);
+  inputs.armed = true;
+  inputs.latest_arming_reason = 1;
+  executor.tick(inputs);
+  inputs.now_us += 1000000;
+  inputs.timesync_fresh = false;
+  EXPECT_FALSE(executor.tick(inputs).request_offboard);
+  inputs.timesync_fresh = true;
+  inputs.now_us += 50000;
+  EXPECT_FALSE(executor.tick(inputs).request_offboard);
+}
+
+TEST(GatewayRegression, LandWaitsForSendAndHasBoundedFailurePaths)
+{
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    offboard_cpp::GatewayExecutor executor;
+    takeoff_to_idle(executor);
+    auto goal = takeoff_goal();
+    goal.command = offboard_cpp::GatewayCommand::LAND;
+    ASSERT_TRUE(executor.start(goal, 3000000));
+    auto inputs = inputs_at(3000001);
+    inputs.armed = true;
+    inputs.offboard = true;
+    inputs.timesync_fresh = false;
+    EXPECT_TRUE(executor.tick(inputs).request_land);
+    EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::LAND_REQUEST);
+    ++inputs.now_us;
+    EXPECT_TRUE(executor.tick(inputs).request_land);
+    inputs.timesync_fresh = true;
+    if (scenario != 0) { executor.land_sent(inputs); }
+    if (scenario == 2) {
+      inputs.land_ack = offboard_cpp::AckResult::REJECTED;
+      ++inputs.land_ack_sequence;
+    } else if (scenario == 3) {
+      inputs.offboard = false;  // RC takeover must not trigger another LAND.
+    } else if (scenario == 4) {
+      inputs.auto_land = true;
+      inputs.offboard = false;
+      inputs.now_us += 60000000;
+    } else {
+      inputs.now_us += 2000000;  // unsent or unacknowledged timeout
+    }
+    EXPECT_FALSE(executor.tick(inputs).request_land);
+    EXPECT_TRUE(executor.result().complete);
+    EXPECT_FALSE(executor.result().succeeded);
+    EXPECT_FALSE(executor.cancel_requested());
+  }
+}
+
+TEST(GatewayRegression, RejectedHandshakeStopsSetpointInSameTick)
+{
+  offboard_cpp::GatewayExecutor executor;
+  boot_to_ready(executor);
+  ASSERT_TRUE(executor.start(takeoff_goal(), 1));
+  auto inputs = inputs_at(2);
+  inputs.armed = true;
+  inputs.latest_arming_reason = 1;
+  executor.tick(inputs);
+  inputs.now_us += 1000000;
+  ASSERT_TRUE(executor.tick(inputs).request_offboard);
+  inputs.offboard_ack = offboard_cpp::AckResult::REJECTED;
+  inputs.ack_sequence = 1;
+  ++inputs.now_us;
+  EXPECT_FALSE(executor.tick(inputs).publish_setpoint);
+  EXPECT_EQ(executor.state(), offboard_cpp::GatewayState::FAILED);
+}

@@ -21,6 +21,7 @@ constexpr std::uint8_t kPx4TargetComponent = 1;
 constexpr std::uint8_t kMissionSourceSystem = 1;
 constexpr std::uint16_t kMissionSourceComponent = 1;
 
+bool is_mission_land_ack(const px4_msgs::msg::VehicleCommandAck & ack);
 bool is_mission_offboard_ack(const px4_msgs::msg::VehicleCommandAck & ack);
 bool is_local_position_healthy(const px4_msgs::msg::VehicleLocalPosition & position);
 }  // namespace detail
@@ -32,7 +33,8 @@ public:
   ~Px4Interface();
   MissionInputs snapshot(std::int64_t steady_now_us) const;
   // 本类是唯一允许写入 /fmu/in/* 的生产边界；时间同步失效时宁可不发布过期时间戳。
-  void publish(const MissionActions & actions, std::int64_t steady_now_us);
+  // true 表示已交给 ROS publisher，不代表 PX4 已 ACK。
+  bool publish(const MissionActions & actions, std::int64_t steady_now_us);
 
 private:
   struct Data;

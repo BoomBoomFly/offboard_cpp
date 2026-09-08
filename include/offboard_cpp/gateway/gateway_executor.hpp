@@ -48,6 +48,8 @@ public:
   bool cancel_requested() const;
   void request_cancel();
   MissionActions tick(const MissionInputs & inputs);
+  // 仅发送成功后冻结落地/ACK 基线；发送失败留在 LAND_REQUEST。
+  void land_sent(const MissionInputs & inputs);
 
   GatewayState state() const { return state_; }
   GatewayCommand active_command() const { return goal_.command; }
@@ -88,6 +90,7 @@ private:
   bool offboard_ack_accepted_{};
   std::int64_t offboard_ack_accepted_at_us_{};
   std::uint64_t land_request_sequence_{};
+  std::uint64_t land_ack_sequence_{};
   std::uint64_t completion_sequence_{};
   std::uint16_t state_reason_{};
 };
